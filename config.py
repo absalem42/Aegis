@@ -13,6 +13,15 @@ EXECUTION_MODE_PAPER = "paper"
 EXECUTION_MODE_KRAKEN = "kraken"
 MARKET_DATA_MODES = (MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN)
 EXECUTION_MODES = (EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN)
+DEFAULT_AGENT_CAPABILITIES = (
+    "paper-trading",
+    "risk-checks",
+    "trade-intent-artifacts",
+    "decision-audit-trail",
+    "kraken-public-market-data",
+    "kraken-execution-stub",
+    "erc8004-ready-structure",
+)
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -33,6 +42,13 @@ def _parse_execution_mode(value: str | None) -> str:
     return EXECUTION_MODE_PAPER
 
 
+def _parse_capabilities(value: str | None) -> Tuple[str, ...]:
+    if not value:
+        return DEFAULT_AGENT_CAPABILITIES
+    items = tuple(item.strip() for item in value.split(",") if item.strip())
+    return items or DEFAULT_AGENT_CAPABILITIES
+
+
 @dataclass(slots=True)
 class Settings:
     db_path: Path = Path(os.getenv("AEGIS_DB_PATH", "data/aegis.db"))
@@ -40,6 +56,18 @@ class Settings:
     symbols: Tuple[str, ...] = ("BTC/USD", "ETH/USD", "SOL/USD")
     market_data_mode: str = MARKET_DATA_MODE_MOCK
     execution_mode: str = EXECUTION_MODE_PAPER
+    kraken_base_url: str = os.getenv("AEGIS_KRAKEN_BASE_URL", "https://api.kraken.com")
+    kraken_timeout_seconds: float = float(os.getenv("AEGIS_KRAKEN_TIMEOUT_SECONDS", "5"))
+    kraken_ohlc_interval_minutes: int = int(os.getenv("AEGIS_KRAKEN_OHLC_INTERVAL_MINUTES", "60"))
+    kraken_history_length: int = int(os.getenv("AEGIS_KRAKEN_HISTORY_LENGTH", "60"))
+    kraken_allow_fallback_to_mock: bool = field(
+        default_factory=lambda: _parse_bool(os.getenv("AEGIS_KRAKEN_ALLOW_FALLBACK_TO_MOCK"), True)
+    )
+    kraken_user_agent: str = os.getenv("AEGIS_KRAKEN_USER_AGENT", "Aegis-local-demo")
+    agent_id: str = os.getenv("AEGIS_AGENT_ID", "aegis-local-agent")
+    agent_name: str = os.getenv("AEGIS_AGENT_NAME", "Aegis")
+    agent_version: str = os.getenv("AEGIS_AGENT_VERSION", "0.1.0")
+    agent_capabilities: Tuple[str, ...] = DEFAULT_AGENT_CAPABILITIES
     starting_cash: float = float(os.getenv("AEGIS_STARTING_CASH", "100000"))
     trade_fraction: float = float(os.getenv("AEGIS_TRADE_FRACTION", "0.10"))
     max_risk_per_trade: float = float(os.getenv("AEGIS_MAX_RISK_PER_TRADE", "0.10"))
@@ -61,6 +89,19 @@ def load_settings() -> Settings:
         artifact_dir=Path(os.getenv("AEGIS_ARTIFACT_DIR", "artifacts")),
         market_data_mode=_parse_market_data_mode(os.getenv("AEGIS_MARKET_DATA_MODE")),
         execution_mode=_parse_execution_mode(os.getenv("AEGIS_EXECUTION_MODE")),
+        kraken_base_url=os.getenv("AEGIS_KRAKEN_BASE_URL", "https://api.kraken.com"),
+        kraken_timeout_seconds=float(os.getenv("AEGIS_KRAKEN_TIMEOUT_SECONDS", "5")),
+        kraken_ohlc_interval_minutes=int(os.getenv("AEGIS_KRAKEN_OHLC_INTERVAL_MINUTES", "60")),
+        kraken_history_length=int(os.getenv("AEGIS_KRAKEN_HISTORY_LENGTH", "60")),
+        kraken_allow_fallback_to_mock=_parse_bool(
+            os.getenv("AEGIS_KRAKEN_ALLOW_FALLBACK_TO_MOCK"),
+            True,
+        ),
+        kraken_user_agent=os.getenv("AEGIS_KRAKEN_USER_AGENT", "Aegis-local-demo"),
+        agent_id=os.getenv("AEGIS_AGENT_ID", "aegis-local-agent"),
+        agent_name=os.getenv("AEGIS_AGENT_NAME", "Aegis"),
+        agent_version=os.getenv("AEGIS_AGENT_VERSION", "0.1.0"),
+        agent_capabilities=_parse_capabilities(os.getenv("AEGIS_AGENT_CAPABILITIES")),
         starting_cash=float(os.getenv("AEGIS_STARTING_CASH", "100000")),
         trade_fraction=float(os.getenv("AEGIS_TRADE_FRACTION", "0.10")),
         max_risk_per_trade=float(os.getenv("AEGIS_MAX_RISK_PER_TRADE", "0.10")),

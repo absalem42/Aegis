@@ -48,7 +48,8 @@ In practice:
 ## Market Data Interface Boundary
 
 - Keep a clear boundary around market price input.
-- v0 may use simple local data, seeded demo data, or lightweight public price inputs.
+- v0 may use deterministic local data or lightweight public price inputs.
+- A real Kraken public REST market-data adapter is acceptable in v0 as long as execution remains local and paper-only.
 - Do not couple the core engine directly to authenticated exchange APIs.
 - The market data boundary should make it possible to introduce Kraken-facing or other providers later without rewriting the engine.
 
@@ -68,7 +69,8 @@ In practice:
 
 ## Extension Points for Later
 
-- Kraken can later plug into the broker and market data boundaries.
+- Kraken public market data can already plug into the market data boundary.
+- Kraken execution still belongs in a later adapter behind the broker boundary.
 - ERC-8004 can later plug into artifact export or publishing paths.
 - These extension points should stay explicit but lightweight in v0.
 

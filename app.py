@@ -13,7 +13,9 @@ from config import (
     load_settings,
 )
 from dashboard.audit import (
+    build_agent_identity_summary,
     build_proof_summary,
+    build_trust_readiness_summary,
     format_decision_chain_rows,
     format_decision_chain_summary,
     format_artifact_rows,
@@ -38,16 +40,24 @@ from db import (
     reset_runtime_state,
     upsert_daily_metrics,
 )
-from engine import reseed_demo_state, resolve_runtime_components, run_engine_cycle
+from engine import (
+    MARKET_DATA_STATUS_ACTIVE,
+    MARKET_DATA_STATUS_FALLBACK_TO_MOCK,
+    MARKET_DATA_STATUS_UNAVAILABLE,
+    reseed_demo_state,
+    resolve_runtime_components,
+    run_engine_cycle,
+)
+from market.kraken_client import KrakenMarketDataError
 
 
 MARKET_MODE_LABELS = {
-    MARKET_DATA_MODE_MOCK: "Mock",
-    MARKET_DATA_MODE_KRAKEN: "Kraken-ready (stub)",
+    MARKET_DATA_MODE_MOCK: "Mock (deterministic demo)",
+    MARKET_DATA_MODE_KRAKEN: "Kraken public market data",
 }
 EXECUTION_MODE_LABELS = {
-    EXECUTION_MODE_PAPER: "Paper",
-    EXECUTION_MODE_KRAKEN: "Kraken-ready (stub)",
+    EXECUTION_MODE_PAPER: "Paper (safe local execution)",
+    EXECUTION_MODE_KRAKEN: "Kraken execution (stub, disabled)",
 }
 
 
@@ -61,6 +71,19 @@ def _show_table(title: str, rows: list[dict], empty_message: str) -> None:
         st.dataframe(_frame(rows), use_container_width=True)
     else:
         st.info(empty_message)
+
+
+def _empty_daily_metrics(starting_cash: float) -> dict[str, float]:
+    return {
+        "trading_day": "",
+        "starting_cash": starting_cash,
+        "ending_cash": starting_cash,
+        "realized_pnl": 0.0,
+        "unrealized_pnl": 0.0,
+        "trade_count": 0,
+        "blocked_trade_count": 0,
+        "max_drawdown": 0.0,
+    }
 
 
 def main() -> None:
@@ -96,14 +119,26 @@ def main() -> None:
             execution_mode=execution_mode,
         )
         provider, _executor, mode_state = resolve_runtime_components(settings)
-        if st.button("Run One Engine Cycle", type="primary", use_container_width=True):
-            latest_result = run_engine_cycle(settings)
-            st.session_state.aegis_notice = (
-                "success",
-                f"Run {latest_result.run_id[:8]} completed: "
-                f"{latest_result.executed_count} executed, "
-                f"{latest_result.blocked_count} blocked.",
-            )
+        runs_blocked = mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
+        if runs_blocked:
+            st.error("Kraken public market data is unavailable and fallback to mock is disabled.")
+        if st.button(
+            "Run One Engine Cycle",
+            type="primary",
+            use_container_width=True,
+            disabled=runs_blocked,
+        ):
+            try:
+                latest_result = run_engine_cycle(settings)
+            except KrakenMarketDataError as exc:
+                st.session_state.aegis_notice = ("error", str(exc))
+            else:
+                st.session_state.aegis_notice = (
+                    "success",
+                    f"Run {latest_result.run_id[:8]} completed: "
+                    f"{latest_result.executed_count} executed, "
+                    f"{latest_result.blocked_count} blocked.",
+                )
             st.rerun()
         if st.button("Reset Local State", use_container_width=True):
             summary = reset_runtime_state(settings)
@@ -114,17 +149,27 @@ def main() -> None:
                 f"Artifact entries removed: {summary['artifact_entries_removed']}.",
             )
             st.rerun()
-        if st.button("Reseed Demo State", use_container_width=True):
-            summary = reseed_demo_state(settings, cycles=reseed_cycles)
-            last_result = summary["results"][-1]
-            st.session_state.aegis_notice = (
-                "success",
-                f"Demo reseeded with {summary['cycles']} deterministic cycles. "
-                f"Last run executed {last_result['executed_count']} trades and blocked {last_result['blocked_count']}.",
-            )
+        if st.button("Reseed Demo State", use_container_width=True, disabled=runs_blocked):
+            try:
+                summary = reseed_demo_state(settings, cycles=reseed_cycles)
+            except KrakenMarketDataError as exc:
+                st.session_state.aegis_notice = ("error", str(exc))
+            else:
+                last_result = summary["results"][-1]
+                st.session_state.aegis_notice = (
+                    "success",
+                    f"Demo reseeded with {summary['cycles']} deterministic cycles. "
+                    f"Last run executed {last_result['executed_count']} trades and blocked {last_result['blocked_count']}.",
+                )
             st.rerun()
 
-    latest_prices = provider.get_latest_prices()
+    latest_prices: dict[str, float] = {}
+    if not runs_blocked:
+        try:
+            latest_prices = provider.get_latest_prices()
+        except KrakenMarketDataError as exc:
+            st.warning(f"Latest Kraken prices could not be loaded: {exc}")
+            latest_prices = {}
 
     if st.session_state.aegis_notice:
         level, message = st.session_state.aegis_notice
@@ -137,7 +182,7 @@ def main() -> None:
         init_db(connection)
         prices_df = pd.DataFrame(
             [{"symbol": symbol, "price": price} for symbol, price in latest_prices.items()]
-        )
+        ) if latest_prices else pd.DataFrame(columns=["symbol", "price"])
         signals = list_recent(connection, "signals", limit=10)
         positions = list_positions(connection)
         trades = list_recent(connection, "trades", limit=10)
@@ -145,7 +190,16 @@ def main() -> None:
         artifacts = list_recent(connection, "artifacts", limit=10)
         agent_runs = list_recent(connection, "agent_runs", limit=10)
         latest_artifact = load_latest_artifact(connection)
-        daily_metrics = upsert_daily_metrics(connection, settings, latest_prices)
+        if latest_prices:
+            daily_metrics = upsert_daily_metrics(connection, settings, latest_prices)
+        else:
+            daily_metrics = list_recent(
+                connection,
+                "daily_metrics",
+                limit=1,
+                order_by="trading_day",
+            )
+            daily_metrics = daily_metrics[0] if daily_metrics else _empty_daily_metrics(settings.starting_cash)
         status_summary = get_status_summary(connection, settings)
         signal_rows = format_signal_rows(signals)
         blocked_rows = format_blocked_trade_rows(blocked)
@@ -156,28 +210,58 @@ def main() -> None:
         decision_chains = []
 
     metrics = build_dashboard_metrics(daily_metrics)
+    agent_identity_summary = build_agent_identity_summary(settings, mode_state.to_dict())
+    latest_linked_trade = trades[0] if trades else None
+    trust_readiness_summary = build_trust_readiness_summary(latest_artifact, latest_linked_trade)
+
     st.markdown("### Local Status")
-    status_cols = st.columns(6)
-    status_cols[0].metric("Market Data", mode_state.effective_market_data_mode.upper())
-    status_cols[1].metric("Execution", mode_state.effective_execution_mode.upper())
-    status_cols[2].metric("Trades", f"{status_summary['trade_count']}")
-    status_cols[3].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
-    status_cols[4].metric("Open Positions", f"{status_summary['open_position_count']}")
-    status_cols[5].metric("Tracked Symbols", f"{len(settings.symbols)}")
+    status_cols = st.columns(8)
+    status_cols[0].metric("Requested Market", mode_state.requested_market_data_mode.upper())
+    status_cols[1].metric("Effective Market", str(mode_state.effective_market_data_mode).upper())
+    status_cols[2].metric("Requested Execution", mode_state.requested_execution_mode.upper())
+    status_cols[3].metric("Effective Execution", mode_state.effective_execution_mode.upper())
+    status_cols[4].metric("Kraken Data Status", mode_state.market_data_status)
+    status_cols[5].metric("Trades", f"{status_summary['trade_count']}")
+    status_cols[6].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
+    status_cols[7].metric("Open Positions", f"{status_summary['open_position_count']}")
 
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
         st.write(f"Artifact directory: `{status_summary['artifact_directory']}`")
+        st.write(f"Market data provider: `{mode_state.market_data_provider}`")
+        st.write(f"Market data source type: `{mode_state.market_data_source_type}`")
+        st.write(f"Kraken data status: `{mode_state.market_data_status}`")
         st.write(f"Execution mode: `{mode_state.effective_execution_mode}`")
         st.write(f"Requested market data mode: `{mode_state.requested_market_data_mode}`")
         st.write(f"Requested execution mode: `{mode_state.requested_execution_mode}`")
 
     st.markdown("### Readiness Status")
-    st.caption("Current demo runs locally with mock data and paper execution. Kraken boundaries exist but live trading is disabled in v0.")
+    st.caption(
+        "Kraken public market data can feed the strategy when available. "
+        "All execution remains local paper execution in v0."
+    )
     readiness_cols = st.columns(3)
-    readiness_cols[0].metric("Mock Market Data", "ACTIVE" if mode_state.effective_market_data_mode == "mock" else "OFF")
-    readiness_cols[1].metric("Paper Execution", "ACTIVE" if mode_state.effective_execution_mode == "paper" else "OFF")
-    readiness_cols[2].metric("Kraken Boundary", "READY (STUB)")
+    readiness_cols[0].metric("Market Provider", mode_state.market_data_provider)
+    readiness_cols[1].metric("Market Status", mode_state.market_data_status)
+    readiness_cols[2].metric("Execution Safety", "PAPER ONLY")
+
+    trust_left, trust_right = st.columns(2)
+    with trust_left:
+        st.markdown("### Agent Identity")
+        st.caption("Local agent identity used to structure proof artifacts for future ERC-8004-style validation.")
+        st.json(agent_identity_summary)
+    with trust_right:
+        st.markdown("### Trust / Validation Readiness")
+        st.caption("Local readiness only. No on-chain publishing or signing occurs in v0.")
+        if trust_readiness_summary:
+            st.metric(
+                "Artifact Readiness",
+                f"{trust_readiness_summary['ready_checks_passed']}/{trust_readiness_summary['ready_checks_total']}",
+            )
+            st.write(trust_readiness_summary["summary"])
+            st.json({"checks": trust_readiness_summary["checks"]})
+        else:
+            st.info("No trust artifact yet. Run one engine cycle or reseed the demo state.")
 
     st.markdown("### Trading Metrics")
     metric_cols = st.columns(4)
@@ -194,6 +278,11 @@ def main() -> None:
                 "run_id": row["run_id_short"],
                 "ts": row["ts"],
                 "status": row["status"],
+                "market_data": (
+                    f"{row['market_data_provider']} ({row['market_data_status']})"
+                    if row.get("market_data_provider")
+                    else "N/A"
+                ),
                 "signals": row["signal_count"],
                 "executed": row["executed_count"],
                 "blocked": row["blocked_count"],
@@ -237,6 +326,8 @@ def main() -> None:
                         "run_id": run_detail["run_id"],
                         "timestamp": run_detail["timestamp"],
                         "status": run_detail["status"],
+                        "market_data_provider": selected_run.get("market_data_provider"),
+                        "market_data_status": selected_run.get("market_data_status"),
                         "signal_count": run_detail["signal_count"],
                         "executed_count": run_detail["executed_count"],
                         "blocked_count": run_detail["blocked_count"],
@@ -265,7 +356,10 @@ def main() -> None:
             st.json(
                 {
                     "observed_prices": proof_summary["observed_prices"],
+                    "market_data_provider": proof_summary["market_data_provider"],
+                    "market_data_status": proof_summary["market_data_status"],
                     "modes": proof_summary["modes"],
+                    "agent": agent_identity_summary,
                 }
             )
         if selected_run_scope:
@@ -298,6 +392,13 @@ def main() -> None:
             st.write(f"Artifact id: `{latest_summary['artifact_id'] or 'Not created'}`")
             st.write(f"Path: `{latest_summary['artifact_path'] or 'N/A'}`")
             st.write(f"Short hash: `{latest_summary['artifact_hash'] or 'N/A'}`")
+            st.write(f"Agent: `{latest_summary['artifact_agent_name'] or 'N/A'}`")
+            st.write(f"Readiness: `{latest_summary['artifact_readiness'] or 'N/A'}`")
+            st.write(
+                "Market data: "
+                f"`{latest_summary['artifact_market_data_provider'] or 'N/A'}` "
+                f"({latest_summary['artifact_market_data_status'] or 'N/A'})"
+            )
         with execution_col:
             st.subheader("Execution Outcome")
             st.write(f"Status: `{latest_summary['trade_status']}`")
@@ -317,8 +418,16 @@ def main() -> None:
     left, right = st.columns(2)
     with left:
         st.subheader("Latest Prices")
-        st.caption("Deterministic local demo prices for the current session.")
-        st.dataframe(prices_df, use_container_width=True)
+        if mode_state.market_data_status == MARKET_DATA_STATUS_ACTIVE:
+            st.caption("Live public Kraken market data for the current session.")
+        elif mode_state.market_data_status == MARKET_DATA_STATUS_FALLBACK_TO_MOCK:
+            st.caption("Kraken public market data fell back to deterministic mock prices for this session.")
+        else:
+            st.caption("Deterministic local demo prices for the current session.")
+        if latest_prices:
+            st.dataframe(prices_df, use_container_width=True)
+        else:
+            st.info("Latest prices are unavailable for the current mode selection.")
 
     with right:
         _show_table(
@@ -366,6 +475,9 @@ def main() -> None:
                     "risk_allowed": preview["risk_allowed"],
                     "risk_reason_codes": preview["risk_reason_codes"],
                     "modes": preview["modes"],
+                    "market_data": preview["market_data"],
+                    "agent": preview["agent"],
+                    "validation_readiness": preview["validation_readiness"],
                     "path": preview["path"],
                     "hash": preview["hash"],
                 }

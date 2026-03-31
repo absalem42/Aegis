@@ -30,15 +30,21 @@ from execution import ExecutionProvider
 from execution.kraken_executor import KrakenExecutorStub
 from execution.paper_executor import PaperExecutor
 from market import MarketDataProvider
-from market.kraken_client import KrakenMarketClientStub
+from market.kraken_client import KrakenMarketDataError, KrakenPublicMarketDataProvider
 from market.mock_data import MockMarketDataProvider
 from models import EngineCycleResult, Signal
+from proof.agent_identity import build_agent_identity
 from proof.artifact_store import save_trade_artifact
 from proof.trade_intent import build_trade_intent
 from risk.engine import RiskEngine
 from strategy.regime_strategy import RegimeStrategy
 
 logger = logging.getLogger(__name__)
+
+MARKET_DATA_STATUS_ACTIVE = "ACTIVE"
+MARKET_DATA_STATUS_FALLBACK_TO_MOCK = "FALLBACK_TO_MOCK"
+MARKET_DATA_STATUS_UNAVAILABLE = "UNAVAILABLE"
+MARKET_DATA_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
 
 
 @dataclass(slots=True)
@@ -47,6 +53,11 @@ class RuntimeModeState:
     effective_market_data_mode: str
     requested_execution_mode: str
     effective_execution_mode: str
+    market_data_provider: str
+    market_data_status: str
+    market_data_source_type: str
+    kraken_ohlc_interval_minutes: int
+    kraken_history_length: int
     warnings: list[str]
 
     def to_dict(self) -> dict[str, object]:
@@ -55,6 +66,11 @@ class RuntimeModeState:
             "effective_market_data_mode": self.effective_market_data_mode,
             "requested_execution_mode": self.requested_execution_mode,
             "effective_execution_mode": self.effective_execution_mode,
+            "market_data_provider": self.market_data_provider,
+            "market_data_status": self.market_data_status,
+            "market_data_source_type": self.market_data_source_type,
+            "kraken_ohlc_interval_minutes": self.kraken_ohlc_interval_minutes,
+            "kraken_history_length": self.kraken_history_length,
             "warnings": self.warnings,
         }
 
@@ -67,12 +83,48 @@ def resolve_runtime_components(
     execution_provider: ExecutionProvider = PaperExecutor()
     effective_market_mode = MARKET_DATA_MODE_MOCK
     effective_execution_mode = EXECUTION_MODE_PAPER
+    market_data_provider = "Mock Deterministic Demo"
+    market_data_status = MARKET_DATA_STATUS_NOT_REQUESTED
+    market_data_source_type = "deterministic-demo"
 
     if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
-        warnings.append(
-            "Kraken market data mode is stubbed in v0. Using mock market data for this session."
-        )
-        _ = KrakenMarketClientStub()
+        try:
+            kraken_provider = KrakenPublicMarketDataProvider(
+                symbols=settings.symbols,
+                base_url=settings.kraken_base_url,
+                timeout_seconds=settings.kraken_timeout_seconds,
+                ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
+                history_length=settings.kraken_history_length,
+                user_agent=settings.kraken_user_agent,
+            )
+            kraken_provider.ensure_available()
+        except KrakenMarketDataError as exc:
+            if settings.kraken_allow_fallback_to_mock:
+                warnings.append(
+                    "Kraken public market data is unavailable "
+                    f"({exc}). Using mock market data for this session."
+                )
+                market_provider = MockMarketDataProvider(settings.symbols)
+                effective_market_mode = MARKET_DATA_MODE_MOCK
+                market_data_provider = "Mock Deterministic Demo"
+                market_data_status = MARKET_DATA_STATUS_FALLBACK_TO_MOCK
+                market_data_source_type = "deterministic-demo"
+            else:
+                warnings.append(
+                    "Kraken public market data is unavailable "
+                    f"({exc}). Fallback to mock is disabled, so engine runs are blocked."
+                )
+                market_provider = MockMarketDataProvider(settings.symbols)
+                effective_market_mode = "unavailable"
+                market_data_provider = "Kraken Public REST"
+                market_data_status = MARKET_DATA_STATUS_UNAVAILABLE
+                market_data_source_type = "public-rest"
+        else:
+            market_provider = kraken_provider
+            effective_market_mode = MARKET_DATA_MODE_KRAKEN
+            market_data_provider = kraken_provider.provider_name
+            market_data_status = MARKET_DATA_STATUS_ACTIVE
+            market_data_source_type = kraken_provider.source_type
 
     if settings.execution_mode == EXECUTION_MODE_KRAKEN:
         warnings.append(
@@ -85,6 +137,11 @@ def resolve_runtime_components(
         effective_market_data_mode=effective_market_mode,
         requested_execution_mode=settings.execution_mode,
         effective_execution_mode=effective_execution_mode,
+        market_data_provider=market_data_provider,
+        market_data_status=market_data_status,
+        market_data_source_type=market_data_source_type,
+        kraken_ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
+        kraken_history_length=settings.kraken_history_length,
         warnings=warnings,
     )
     return market_provider, execution_provider, mode_state
@@ -96,9 +153,15 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
     settings.ensure_paths()
 
     provider, executor, mode_state = resolve_runtime_components(settings)
+    if mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE:
+        raise KrakenMarketDataError(
+            "Kraken public market data is unavailable and fallback to mock is disabled. "
+            "Aegis did not run this cycle."
+        )
     strategy = RegimeStrategy()
     risk_engine = RiskEngine(settings)
     run_id = str(uuid4())
+    agent_identity = build_agent_identity(settings, mode_state.to_dict())
 
     with get_connection(settings.db_path) as connection:
         init_db(connection)
@@ -161,6 +224,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 price=latest_prices[signal.symbol],
                 latest_price=latest_prices[signal.symbol],
                 mode_summary=mode_state.to_dict(),
+                agent_identity=agent_identity,
             )
             artifact_meta = save_trade_artifact(connection, settings, artifact_payload)
             artifact_count += 1

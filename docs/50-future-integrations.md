@@ -6,14 +6,19 @@ This file describes how Aegis should stay ready for future integrations without 
 
 ## Kraken Integration Shape Later
 
-Kraken should later appear as an adapter behind the existing boundaries, not as logic mixed directly into the core engine.
+Kraken should appear as adapters behind the existing boundaries, not as logic mixed directly into the core engine.
 
 Expected shape:
 
-- A broker-facing adapter for execution behavior
-- A market-data-facing adapter if Kraken market data is used
+- A market-data-facing adapter for public Kraken data
+- A broker-facing adapter for execution behavior later
 - Authentication and request signing isolated inside the adapter layer
 - Minimal Kraken-specific leakage into core trading logic
+
+Current reality:
+
+- Public Kraken market data may be used in v0.
+- Kraken execution remains deferred and stubbed.
 
 ## ERC-8004 / Trust Artifact Shape Later
 
@@ -42,6 +47,7 @@ The following are not acceptable in v0:
 ## Explicitly Deferred
 
 - Real exchange execution
+- Authenticated Kraken execution
 - Secret management for live trading
 - On-chain publishing or verification
 - Production trust, dispute, or attestation workflows

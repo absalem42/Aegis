@@ -88,6 +88,8 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for row in rows:
         payload = _loads_json(row.get("payload_json"))
         risk = payload.get("risk", {})
+        readiness = payload.get("validation_readiness", {})
+        market_data = payload.get("market_data", {})
         formatted.append(
             {
                 "ts": row.get("ts"),
@@ -98,6 +100,10 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "price": payload.get("price"),
                 "signal_reason": payload.get("reason"),
                 "risk_allowed": risk.get("allowed"),
+                "agent_name": payload.get("agent", {}).get("agent_name"),
+                "market_data_provider": market_data.get("provider"),
+                "market_data_status": market_data.get("status"),
+                "readiness": _readiness_badge(readiness),
                 "path": row.get("path"),
                 "hash": str(row.get("hash_or_digest", ""))[:12],
             }
@@ -110,6 +116,8 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         return None
     payload = _loads_json(row.get("payload_json"))
     risk = payload.get("risk", {})
+    readiness = payload.get("validation_readiness", {})
+    market_data = payload.get("market_data", {})
     return {
         "artifact_id": row.get("id"),
         "type": row.get("artifact_type"),
@@ -125,6 +133,9 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "path": row.get("path"),
         "hash": str(row.get("hash_or_digest", ""))[:16],
         "modes": payload.get("modes", {}),
+        "market_data": market_data,
+        "agent": payload.get("agent", {}),
+        "validation_readiness": readiness,
         "summary": "Pre-execution local TradeIntent artifact saved before a paper trade decision.",
     }
 
@@ -146,6 +157,8 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "latest_prices": summary.get("latest_prices", {}),
                 "metrics": summary.get("metrics", {}),
                 "modes": summary.get("modes", {}),
+                "market_data_provider": summary.get("modes", {}).get("market_data_provider"),
+                "market_data_status": summary.get("modes", {}).get("market_data_status"),
             }
         )
     return formatted
@@ -329,8 +342,52 @@ def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] |
         "artifact_count": selected_run.get("artifact_count", 0),
         "observed_prices": prices,
         "modes": selected_run.get("modes", {}),
+        "market_data_provider": selected_run.get("market_data_provider"),
+        "market_data_status": selected_run.get("market_data_status"),
         "why_it_matters": (
             "This run preserves a local trail from signal to risk decision to artifact and final outcome, making the demo easier to audit."
+        ),
+    }
+
+
+def build_agent_identity_summary(
+    settings: Any,
+    mode_summary: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "agent_id": getattr(settings, "agent_id", "unknown"),
+        "agent_name": getattr(settings, "agent_name", "unknown"),
+        "version": getattr(settings, "agent_version", "unknown"),
+        "capabilities": list(getattr(settings, "agent_capabilities", ())),
+        "market_data_mode": mode_summary.get("effective_market_data_mode"),
+        "execution_mode": mode_summary.get("effective_execution_mode"),
+        "market_data_provider": mode_summary.get("market_data_provider"),
+        "market_data_status": mode_summary.get("market_data_status"),
+        "scope": "local-only",
+    }
+
+
+def build_trust_readiness_summary(
+    artifact_row: dict[str, Any] | None,
+    linked_trade_row: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not artifact_row:
+        return None
+    payload = _loads_json(artifact_row.get("payload_json"))
+    readiness = payload.get("validation_readiness", {})
+    checks = dict(readiness.get("checks", {}))
+    if linked_trade_row is not None:
+        checks["has_execution_outcome_linkage"] = True
+    passed = sum(1 for value in checks.values() if value)
+    total = len(checks) if checks else 0
+    return {
+        "profile": readiness.get("profile", "local-erc8004-readiness"),
+        "checks": checks,
+        "ready_checks_passed": passed,
+        "ready_checks_total": total,
+        "summary": readiness.get(
+            "summary",
+            "Locally structured for future ERC-8004-style validation; no on-chain publishing exists in v0.",
         ),
     }
 
@@ -357,6 +414,10 @@ def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
         "artifact_id": artifact.get("artifact_id"),
         "artifact_path": artifact.get("path"),
         "artifact_hash": artifact.get("hash"),
+        "artifact_agent_name": artifact.get("agent_name"),
+        "artifact_readiness": artifact.get("readiness"),
+        "artifact_market_data_provider": artifact.get("market_data_provider"),
+        "artifact_market_data_status": artifact.get("market_data_status"),
         "trade_status": execution.get("status"),
         "quantity": execution.get("quantity"),
         "price_executed": execution.get("price"),
@@ -491,12 +552,19 @@ def _signal_summary(row: dict[str, Any] | None) -> dict[str, Any]:
 def _artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {"created": False, "summary": "No artifact linked to this decision."}
+    payload = _loads_json(row.get("payload_json"))
+    readiness = payload.get("validation_readiness", {})
+    market_data = payload.get("market_data", {})
     return {
         "created": True,
         "artifact_id": row.get("id"),
         "type": row.get("artifact_type"),
         "path": row.get("path"),
         "hash": str(row.get("hash_or_digest", ""))[:16],
+        "agent_name": payload.get("agent", {}).get("agent_name"),
+        "market_data_provider": market_data.get("provider"),
+        "market_data_status": market_data.get("status"),
+        "readiness": _readiness_badge(readiness),
         "summary": "TradeIntent artifact created before execution.",
     }
 
@@ -506,3 +574,9 @@ def _safe_notional(quantity: Any, price: Any) -> float | None:
         return round(float(quantity) * float(price), 6)
     except (TypeError, ValueError):
         return None
+
+
+def _readiness_badge(readiness: dict[str, Any]) -> str:
+    passed = readiness.get("ready_checks_passed", 0)
+    total = readiness.get("ready_checks_total", 0)
+    return f"{passed}/{total} checks" if total else "N/A"
