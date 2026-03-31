@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -389,6 +390,50 @@ def table_names(connection: sqlite3.Connection) -> set[str]:
         "SELECT name FROM sqlite_master WHERE type = 'table'"
     ).fetchall()
     return {str(row["name"]) for row in rows}
+
+
+def count_rows(connection: sqlite3.Connection, table: str) -> int:
+    return _count_table(connection, table)
+
+
+def get_status_summary(connection: sqlite3.Connection, settings: Settings) -> dict[str, Any]:
+    return {
+        "database_path": str(settings.db_path),
+        "artifact_directory": str(settings.artifact_dir),
+        "mode": "paper",
+        "trade_count": count_rows(connection, "trades"),
+        "blocked_trade_count": count_rows(connection, "blocked_trades"),
+        "open_position_count": count_open_positions(connection),
+    }
+
+
+def reset_runtime_state(settings: Settings) -> dict[str, Any]:
+    db_removed = False
+    artifacts_removed = 0
+
+    if settings.db_path.exists():
+        settings.db_path.unlink()
+        db_removed = True
+
+    if settings.artifact_dir.exists():
+        for child in settings.artifact_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+                artifacts_removed += 1
+            else:
+                child.unlink()
+                artifacts_removed += 1
+
+    settings.ensure_paths()
+    with get_connection(settings.db_path) as connection:
+        init_db(connection)
+
+    return {
+        "database_reset": db_removed,
+        "artifact_entries_removed": artifacts_removed,
+        "db_path": str(settings.db_path),
+        "artifact_dir": str(settings.artifact_dir),
+    }
 
 
 def _count_table(connection: sqlite3.Connection, table: str) -> int:

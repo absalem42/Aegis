@@ -1,0 +1,20 @@
+# Virtual environments
+.venv/
+
+# Python bytecode and caches
+__pycache__/
+*.pyc
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+
+# Streamlit local config/state
+.streamlit/
+
+# Local environment overrides
+.env
+
+# Local runtime data
+data/*.db
+artifacts/

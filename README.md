@@ -29,6 +29,8 @@ The `.env` file is optional for v0 because safe local defaults are built in.
 streamlit run app.py
 ```
 
+The app includes local-only controls to run one engine cycle, reset runtime state, and reseed a predictable demo state.
+
 ## Test
 
 ```powershell

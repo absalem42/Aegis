@@ -135,6 +135,24 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
     )
 
 
+def reseed_demo_state(settings: Settings | None = None, cycles: int = 2) -> dict[str, object]:
+    settings = settings or load_settings()
+    cycles = max(1, cycles)
+
+    from db import reset_runtime_state
+
+    reset_summary = reset_runtime_state(settings)
+    cycle_results: list[dict[str, object]] = []
+    for _ in range(cycles):
+        cycle_results.append(run_engine_cycle(settings).to_dict())
+
+    return {
+        "cycles": cycles,
+        "reset": reset_summary,
+        "results": cycle_results,
+    }
+
+
 def _suggest_quantity(connection, settings: Settings, signal: Signal, price: float) -> float:
     if signal.action == "BUY":
         cash_balance = get_cash_balance(connection, settings.starting_cash)
