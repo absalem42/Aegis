@@ -8,6 +8,8 @@ import streamlit as st
 from config import (
     EXECUTION_MODE_KRAKEN,
     EXECUTION_MODE_PAPER,
+    KRAKEN_BACKEND_CLI,
+    KRAKEN_BACKEND_REST,
     MARKET_DATA_MODE_KRAKEN,
     MARKET_DATA_MODE_MOCK,
     load_settings,
@@ -44,6 +46,11 @@ from engine import (
     MARKET_DATA_STATUS_ACTIVE,
     MARKET_DATA_STATUS_FALLBACK_TO_MOCK,
     MARKET_DATA_STATUS_UNAVAILABLE,
+    KRAKEN_CLI_STATUS_ACTIVE,
+    KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK,
+    KRAKEN_CLI_STATUS_FALLBACK_TO_REST,
+    KRAKEN_CLI_STATUS_NOT_REQUESTED,
+    KRAKEN_CLI_STATUS_UNAVAILABLE,
     reseed_demo_state,
     resolve_runtime_components,
     run_engine_cycle,
@@ -55,9 +62,20 @@ MARKET_MODE_LABELS = {
     MARKET_DATA_MODE_MOCK: "Mock (deterministic demo)",
     MARKET_DATA_MODE_KRAKEN: "Kraken public market data",
 }
+KRAKEN_BACKEND_LABELS = {
+    KRAKEN_BACKEND_REST: "Public REST",
+    KRAKEN_BACKEND_CLI: "Official Kraken CLI",
+}
 EXECUTION_MODE_LABELS = {
     EXECUTION_MODE_PAPER: "Paper (safe local execution)",
     EXECUTION_MODE_KRAKEN: "Kraken execution (stub, disabled)",
+}
+CLI_STATUS_LABELS = {
+    KRAKEN_CLI_STATUS_ACTIVE: "ACTIVE",
+    KRAKEN_CLI_STATUS_FALLBACK_TO_REST: "FALLBACK TO REST",
+    KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK: "FALLBACK TO MOCK",
+    KRAKEN_CLI_STATUS_UNAVAILABLE: "UNAVAILABLE",
+    KRAKEN_CLI_STATUS_NOT_REQUESTED: "NOT REQUESTED",
 }
 
 
@@ -86,6 +104,12 @@ def _empty_daily_metrics(starting_cash: float) -> dict[str, float]:
     }
 
 
+def _backend_label(value: str | None) -> str:
+    if not value:
+        return "N/A"
+    return KRAKEN_BACKEND_LABELS.get(value, value.upper())
+
+
 def main() -> None:
     base_settings = load_settings()
     st.set_page_config(page_title="Aegis v0", layout="wide")
@@ -104,6 +128,14 @@ def main() -> None:
             index=[MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN].index(base_settings.market_data_mode),
             format_func=lambda value: MARKET_MODE_LABELS[value],
         )
+        kraken_backend = base_settings.kraken_backend
+        if market_data_mode == MARKET_DATA_MODE_KRAKEN:
+            kraken_backend = st.selectbox(
+                "Kraken backend",
+                options=[KRAKEN_BACKEND_REST, KRAKEN_BACKEND_CLI],
+                index=[KRAKEN_BACKEND_REST, KRAKEN_BACKEND_CLI].index(base_settings.kraken_backend),
+                format_func=lambda value: KRAKEN_BACKEND_LABELS[value],
+            )
         execution_mode = st.selectbox(
             "Execution mode",
             options=[EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN],
@@ -117,11 +149,12 @@ def main() -> None:
             base_settings,
             market_data_mode=market_data_mode,
             execution_mode=execution_mode,
+            kraken_backend=kraken_backend,
         )
         provider, _executor, mode_state = resolve_runtime_components(settings)
         runs_blocked = mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
         if runs_blocked:
-            st.error("Kraken public market data is unavailable and fallback to mock is disabled.")
+            st.error("The selected Kraken market-data path is unavailable and no safe fallback remains.")
         if st.button(
             "Run One Engine Cycle",
             type="primary",
@@ -215,20 +248,28 @@ def main() -> None:
     trust_readiness_summary = build_trust_readiness_summary(latest_artifact, latest_linked_trade)
 
     st.markdown("### Local Status")
-    status_cols = st.columns(8)
-    status_cols[0].metric("Requested Market", mode_state.requested_market_data_mode.upper())
-    status_cols[1].metric("Effective Market", str(mode_state.effective_market_data_mode).upper())
-    status_cols[2].metric("Requested Execution", mode_state.requested_execution_mode.upper())
-    status_cols[3].metric("Effective Execution", mode_state.effective_execution_mode.upper())
-    status_cols[4].metric("Kraken Data Status", mode_state.market_data_status)
-    status_cols[5].metric("Trades", f"{status_summary['trade_count']}")
-    status_cols[6].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
-    status_cols[7].metric("Open Positions", f"{status_summary['open_position_count']}")
+    mode_cols = st.columns(6)
+    mode_cols[0].metric("Requested Market", mode_state.requested_market_data_mode.upper())
+    mode_cols[1].metric("Effective Market", str(mode_state.effective_market_data_mode).upper())
+    mode_cols[2].metric("Requested Execution", mode_state.requested_execution_mode.upper())
+    mode_cols[3].metric("Effective Execution", mode_state.effective_execution_mode.upper())
+    mode_cols[4].metric("Requested Kraken Backend", _backend_label(mode_state.requested_kraken_backend))
+    mode_cols[5].metric("Effective Kraken Backend", _backend_label(mode_state.effective_kraken_backend))
+
+    status_cols = st.columns(5)
+    status_cols[0].metric("Kraken CLI Status", CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status))
+    status_cols[1].metric("Kraken Data Status", mode_state.market_data_status.replace("_", " "))
+    status_cols[2].metric("Trades", f"{status_summary['trade_count']}")
+    status_cols[3].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
+    status_cols[4].metric("Open Positions", f"{status_summary['open_position_count']}")
 
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
         st.write(f"Artifact directory: `{status_summary['artifact_directory']}`")
         st.write(f"Market data provider: `{mode_state.market_data_provider}`")
+        st.write(f"Requested Kraken backend: `{_backend_label(mode_state.requested_kraken_backend)}`")
+        st.write(f"Effective Kraken backend: `{_backend_label(mode_state.effective_kraken_backend)}`")
+        st.write(f"Kraken CLI status: `{CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status)}`")
         st.write(f"Market data source type: `{mode_state.market_data_source_type}`")
         st.write(f"Kraken data status: `{mode_state.market_data_status}`")
         st.write(f"Execution mode: `{mode_state.effective_execution_mode}`")
@@ -237,13 +278,14 @@ def main() -> None:
 
     st.markdown("### Readiness Status")
     st.caption(
-        "Kraken public market data can feed the strategy when available. "
-        "All execution remains local paper execution in v0."
+        "Kraken public market data can feed the strategy through REST or the official Kraken CLI. "
+        "Execution remains local paper execution in this milestone."
     )
-    readiness_cols = st.columns(3)
+    readiness_cols = st.columns(4)
     readiness_cols[0].metric("Market Provider", mode_state.market_data_provider)
-    readiness_cols[1].metric("Market Status", mode_state.market_data_status)
-    readiness_cols[2].metric("Execution Safety", "PAPER ONLY")
+    readiness_cols[1].metric("Kraken Backend", _backend_label(mode_state.effective_kraken_backend))
+    readiness_cols[2].metric("CLI Status", CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status))
+    readiness_cols[3].metric("Execution Safety", "PAPER ONLY")
 
     trust_left, trust_right = st.columns(2)
     with trust_left:
@@ -279,7 +321,9 @@ def main() -> None:
                 "ts": row["ts"],
                 "status": row["status"],
                 "market_data": (
-                    f"{row['market_data_provider']} ({row['market_data_status']})"
+                    f"{row['market_data_provider']} / "
+                    f"{_backend_label(row.get('effective_kraken_backend'))} / "
+                    f"{row['market_data_status']}"
                     if row.get("market_data_provider")
                     else "N/A"
                 ),
@@ -328,6 +372,12 @@ def main() -> None:
                         "status": run_detail["status"],
                         "market_data_provider": selected_run.get("market_data_provider"),
                         "market_data_status": selected_run.get("market_data_status"),
+                        "requested_kraken_backend": _backend_label(selected_run.get("requested_kraken_backend")),
+                        "effective_kraken_backend": _backend_label(selected_run.get("effective_kraken_backend")),
+                        "kraken_cli_status": CLI_STATUS_LABELS.get(
+                            selected_run.get("kraken_cli_status"),
+                            selected_run.get("kraken_cli_status"),
+                        ),
                         "signal_count": run_detail["signal_count"],
                         "executed_count": run_detail["executed_count"],
                         "blocked_count": run_detail["blocked_count"],
@@ -358,6 +408,11 @@ def main() -> None:
                     "observed_prices": proof_summary["observed_prices"],
                     "market_data_provider": proof_summary["market_data_provider"],
                     "market_data_status": proof_summary["market_data_status"],
+                    "effective_kraken_backend": _backend_label(proof_summary.get("effective_kraken_backend")),
+                    "kraken_cli_status": CLI_STATUS_LABELS.get(
+                        proof_summary.get("kraken_cli_status"),
+                        proof_summary.get("kraken_cli_status"),
+                    ),
                     "modes": proof_summary["modes"],
                     "agent": agent_identity_summary,
                 }
@@ -398,6 +453,11 @@ def main() -> None:
                 "Market data: "
                 f"`{latest_summary['artifact_market_data_provider'] or 'N/A'}` "
                 f"({latest_summary['artifact_market_data_status'] or 'N/A'})"
+            )
+            st.write(f"Kraken backend: `{_backend_label(latest_summary['artifact_market_data_backend'])}`")
+            st.write(
+                "CLI status: "
+                f"`{CLI_STATUS_LABELS.get(latest_summary['artifact_kraken_cli_status'], latest_summary['artifact_kraken_cli_status'] or 'N/A')}`"
             )
         with execution_col:
             st.subheader("Execution Outcome")
@@ -476,6 +536,11 @@ def main() -> None:
                     "risk_reason_codes": preview["risk_reason_codes"],
                     "modes": preview["modes"],
                     "market_data": preview["market_data"],
+                    "kraken_backend": _backend_label(preview.get("kraken_backend")),
+                    "kraken_cli_status": CLI_STATUS_LABELS.get(
+                        preview.get("kraken_cli_status"),
+                        preview.get("kraken_cli_status"),
+                    ),
                     "agent": preview["agent"],
                     "validation_readiness": preview["validation_readiness"],
                     "path": preview["path"],

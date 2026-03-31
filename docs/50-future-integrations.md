@@ -17,7 +17,7 @@ Expected shape:
 
 Current reality:
 
-- Public Kraken market data may be used in v0.
+- Public Kraken market data may be used in v0 through a direct REST adapter or an optional Kraken CLI-backed read-only path.
 - Kraken execution remains deferred and stubbed.
 
 ## ERC-8004 / Trust Artifact Shape Later
@@ -37,6 +37,7 @@ The following are acceptable in v0:
 - Interface definitions
 - Clearly marked stub classes or functions
 - Placeholder modules that establish clean future seams
+- Read-only Kraken CLI alignment for public market data
 
 The following are not acceptable in v0:
 
@@ -48,6 +49,7 @@ The following are not acceptable in v0:
 
 - Real exchange execution
 - Authenticated Kraken execution
+- Kraken CLI trade routing or account mutation flows
 - Secret management for live trading
 - On-chain publishing or verification
 - Production trust, dispute, or attestation workflows

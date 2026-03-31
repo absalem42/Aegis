@@ -102,7 +102,9 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "risk_allowed": risk.get("allowed"),
                 "agent_name": payload.get("agent", {}).get("agent_name"),
                 "market_data_provider": market_data.get("provider"),
+                "kraken_backend": market_data.get("backend"),
                 "market_data_status": market_data.get("status"),
+                "kraken_cli_status": market_data.get("kraken_cli_status"),
                 "readiness": _readiness_badge(readiness),
                 "path": row.get("path"),
                 "hash": str(row.get("hash_or_digest", ""))[:12],
@@ -134,6 +136,8 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "hash": str(row.get("hash_or_digest", ""))[:16],
         "modes": payload.get("modes", {}),
         "market_data": market_data,
+        "kraken_backend": market_data.get("backend"),
+        "kraken_cli_status": market_data.get("kraken_cli_status"),
         "agent": payload.get("agent", {}),
         "validation_readiness": readiness,
         "summary": "Pre-execution local TradeIntent artifact saved before a paper trade decision.",
@@ -159,6 +163,9 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "modes": summary.get("modes", {}),
                 "market_data_provider": summary.get("modes", {}).get("market_data_provider"),
                 "market_data_status": summary.get("modes", {}).get("market_data_status"),
+                "requested_kraken_backend": summary.get("modes", {}).get("requested_kraken_backend"),
+                "effective_kraken_backend": summary.get("modes", {}).get("effective_kraken_backend"),
+                "kraken_cli_status": summary.get("modes", {}).get("kraken_cli_status"),
             }
         )
     return formatted
@@ -344,6 +351,9 @@ def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] |
         "modes": selected_run.get("modes", {}),
         "market_data_provider": selected_run.get("market_data_provider"),
         "market_data_status": selected_run.get("market_data_status"),
+        "requested_kraken_backend": selected_run.get("requested_kraken_backend"),
+        "effective_kraken_backend": selected_run.get("effective_kraken_backend"),
+        "kraken_cli_status": selected_run.get("kraken_cli_status"),
         "why_it_matters": (
             "This run preserves a local trail from signal to risk decision to artifact and final outcome, making the demo easier to audit."
         ),
@@ -363,6 +373,9 @@ def build_agent_identity_summary(
         "execution_mode": mode_summary.get("effective_execution_mode"),
         "market_data_provider": mode_summary.get("market_data_provider"),
         "market_data_status": mode_summary.get("market_data_status"),
+        "requested_kraken_backend": mode_summary.get("requested_kraken_backend"),
+        "effective_kraken_backend": mode_summary.get("effective_kraken_backend"),
+        "kraken_cli_status": mode_summary.get("kraken_cli_status"),
         "scope": "local-only",
     }
 
@@ -417,7 +430,9 @@ def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
         "artifact_agent_name": artifact.get("agent_name"),
         "artifact_readiness": artifact.get("readiness"),
         "artifact_market_data_provider": artifact.get("market_data_provider"),
+        "artifact_market_data_backend": artifact.get("kraken_backend"),
         "artifact_market_data_status": artifact.get("market_data_status"),
+        "artifact_kraken_cli_status": artifact.get("kraken_cli_status"),
         "trade_status": execution.get("status"),
         "quantity": execution.get("quantity"),
         "price_executed": execution.get("price"),
@@ -434,6 +449,7 @@ def format_decision_chain_rows(chains: list[dict[str, Any]]) -> list[dict[str, A
             "outcome": chain.get("outcome"),
             "signal_reason": chain.get("signal_reason"),
             "risk": chain.get("risk", {}).get("summary"),
+            "market_backend": chain.get("artifact", {}).get("kraken_backend") or "mock",
             "artifact": chain.get("artifact", {}).get("artifact_id"),
             "trade_status": chain.get("execution", {}).get("status"),
         }
@@ -563,7 +579,9 @@ def _artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]:
         "hash": str(row.get("hash_or_digest", ""))[:16],
         "agent_name": payload.get("agent", {}).get("agent_name"),
         "market_data_provider": market_data.get("provider"),
+        "kraken_backend": market_data.get("backend"),
         "market_data_status": market_data.get("status"),
+        "kraken_cli_status": market_data.get("kraken_cli_status"),
         "readiness": _readiness_badge(readiness),
         "summary": "TradeIntent artifact created before execution.",
     }

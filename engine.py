@@ -7,6 +7,8 @@ from uuid import uuid4
 from config import (
     EXECUTION_MODE_KRAKEN,
     EXECUTION_MODE_PAPER,
+    KRAKEN_BACKEND_CLI,
+    KRAKEN_BACKEND_REST,
     MARKET_DATA_MODE_KRAKEN,
     MARKET_DATA_MODE_MOCK,
     Settings,
@@ -30,6 +32,7 @@ from execution import ExecutionProvider
 from execution.kraken_executor import KrakenExecutorStub
 from execution.paper_executor import PaperExecutor
 from market import MarketDataProvider
+from market.kraken_cli import KrakenCliError, KrakenCliMarketDataProvider
 from market.kraken_client import KrakenMarketDataError, KrakenPublicMarketDataProvider
 from market.mock_data import MockMarketDataProvider
 from models import EngineCycleResult, Signal
@@ -45,6 +48,11 @@ MARKET_DATA_STATUS_ACTIVE = "ACTIVE"
 MARKET_DATA_STATUS_FALLBACK_TO_MOCK = "FALLBACK_TO_MOCK"
 MARKET_DATA_STATUS_UNAVAILABLE = "UNAVAILABLE"
 MARKET_DATA_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
+KRAKEN_CLI_STATUS_ACTIVE = "ACTIVE"
+KRAKEN_CLI_STATUS_FALLBACK_TO_REST = "FALLBACK_TO_REST"
+KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK = "FALLBACK_TO_MOCK"
+KRAKEN_CLI_STATUS_UNAVAILABLE = "UNAVAILABLE"
+KRAKEN_CLI_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
 
 
 @dataclass(slots=True)
@@ -53,8 +61,11 @@ class RuntimeModeState:
     effective_market_data_mode: str
     requested_execution_mode: str
     effective_execution_mode: str
+    requested_kraken_backend: str | None
+    effective_kraken_backend: str | None
     market_data_provider: str
     market_data_status: str
+    kraken_cli_status: str
     market_data_source_type: str
     kraken_ohlc_interval_minutes: int
     kraken_history_length: int
@@ -66,8 +77,11 @@ class RuntimeModeState:
             "effective_market_data_mode": self.effective_market_data_mode,
             "requested_execution_mode": self.requested_execution_mode,
             "effective_execution_mode": self.effective_execution_mode,
+            "requested_kraken_backend": self.requested_kraken_backend,
+            "effective_kraken_backend": self.effective_kraken_backend,
             "market_data_provider": self.market_data_provider,
             "market_data_status": self.market_data_status,
+            "kraken_cli_status": self.kraken_cli_status,
             "market_data_source_type": self.market_data_source_type,
             "kraken_ohlc_interval_minutes": self.kraken_ohlc_interval_minutes,
             "kraken_history_length": self.kraken_history_length,
@@ -83,48 +97,80 @@ def resolve_runtime_components(
     execution_provider: ExecutionProvider = PaperExecutor()
     effective_market_mode = MARKET_DATA_MODE_MOCK
     effective_execution_mode = EXECUTION_MODE_PAPER
+    requested_kraken_backend: str | None = None
+    effective_kraken_backend: str | None = None
     market_data_provider = "Mock Deterministic Demo"
     market_data_status = MARKET_DATA_STATUS_NOT_REQUESTED
+    kraken_cli_status = KRAKEN_CLI_STATUS_NOT_REQUESTED
     market_data_source_type = "deterministic-demo"
 
     if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
-        try:
-            kraken_provider = KrakenPublicMarketDataProvider(
-                symbols=settings.symbols,
-                base_url=settings.kraken_base_url,
-                timeout_seconds=settings.kraken_timeout_seconds,
-                ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
-                history_length=settings.kraken_history_length,
-                user_agent=settings.kraken_user_agent,
-            )
-            kraken_provider.ensure_available()
-        except KrakenMarketDataError as exc:
-            if settings.kraken_allow_fallback_to_mock:
-                warnings.append(
-                    "Kraken public market data is unavailable "
-                    f"({exc}). Using mock market data for this session."
-                )
-                market_provider = MockMarketDataProvider(settings.symbols)
-                effective_market_mode = MARKET_DATA_MODE_MOCK
-                market_data_provider = "Mock Deterministic Demo"
-                market_data_status = MARKET_DATA_STATUS_FALLBACK_TO_MOCK
-                market_data_source_type = "deterministic-demo"
+        requested_kraken_backend = settings.kraken_backend
+        if settings.kraken_backend == KRAKEN_BACKEND_CLI:
+            try:
+                kraken_provider = _build_kraken_cli_provider(settings)
+                kraken_provider.ensure_available()
+            except KrakenCliError as exc:
+                if settings.kraken_cli_allow_fallback_to_rest:
+                    warnings.append(
+                        "Kraken CLI market data is unavailable "
+                        f"({exc}). Falling back to Kraken public REST."
+                    )
+                    (
+                        market_provider,
+                        effective_market_mode,
+                        effective_kraken_backend,
+                        market_data_provider,
+                        market_data_status,
+                        market_data_source_type,
+                    ) = _resolve_rest_market_provider(settings, warnings)
+                    if effective_market_mode == MARKET_DATA_MODE_KRAKEN:
+                        kraken_cli_status = KRAKEN_CLI_STATUS_FALLBACK_TO_REST
+                    elif effective_market_mode == MARKET_DATA_MODE_MOCK:
+                        kraken_cli_status = KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK
+                    else:
+                        kraken_cli_status = KRAKEN_CLI_STATUS_UNAVAILABLE
+                elif settings.kraken_allow_fallback_to_mock:
+                    warnings.append(
+                        "Kraken CLI market data is unavailable "
+                        f"({exc}). Kraken REST fallback is disabled, so Aegis is using mock market data."
+                    )
+                    market_provider = MockMarketDataProvider(settings.symbols)
+                    effective_market_mode = MARKET_DATA_MODE_MOCK
+                    effective_kraken_backend = None
+                    market_data_provider = "Mock Deterministic Demo"
+                    market_data_status = MARKET_DATA_STATUS_FALLBACK_TO_MOCK
+                    kraken_cli_status = KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK
+                    market_data_source_type = "deterministic-demo"
+                else:
+                    warnings.append(
+                        "Kraken CLI market data is unavailable "
+                        f"({exc}). All fallbacks are disabled, so engine runs are blocked."
+                    )
+                    market_provider = MockMarketDataProvider(settings.symbols)
+                    effective_market_mode = "unavailable"
+                    effective_kraken_backend = None
+                    market_data_provider = "Kraken Official CLI"
+                    market_data_status = MARKET_DATA_STATUS_UNAVAILABLE
+                    kraken_cli_status = KRAKEN_CLI_STATUS_UNAVAILABLE
+                    market_data_source_type = "cli-json"
             else:
-                warnings.append(
-                    "Kraken public market data is unavailable "
-                    f"({exc}). Fallback to mock is disabled, so engine runs are blocked."
-                )
-                market_provider = MockMarketDataProvider(settings.symbols)
-                effective_market_mode = "unavailable"
-                market_data_provider = "Kraken Public REST"
-                market_data_status = MARKET_DATA_STATUS_UNAVAILABLE
-                market_data_source_type = "public-rest"
+                market_provider = kraken_provider
+                effective_market_mode = MARKET_DATA_MODE_KRAKEN
+                effective_kraken_backend = KRAKEN_BACKEND_CLI
+                market_data_provider = kraken_provider.provider_name
+                market_data_status = MARKET_DATA_STATUS_ACTIVE
+                kraken_cli_status = KRAKEN_CLI_STATUS_ACTIVE
+                market_data_source_type = kraken_provider.source_type
         else:
-            market_provider = kraken_provider
-            effective_market_mode = MARKET_DATA_MODE_KRAKEN
-            market_data_provider = kraken_provider.provider_name
-            market_data_status = MARKET_DATA_STATUS_ACTIVE
-            market_data_source_type = kraken_provider.source_type
+            (
+                market_provider,
+                effective_market_mode,
+                effective_kraken_backend,
+                market_data_provider,
+                market_data_status,
+                market_data_source_type,
+            ) = _resolve_rest_market_provider(settings, warnings)
 
     if settings.execution_mode == EXECUTION_MODE_KRAKEN:
         warnings.append(
@@ -137,14 +183,82 @@ def resolve_runtime_components(
         effective_market_data_mode=effective_market_mode,
         requested_execution_mode=settings.execution_mode,
         effective_execution_mode=effective_execution_mode,
+        requested_kraken_backend=requested_kraken_backend,
+        effective_kraken_backend=effective_kraken_backend,
         market_data_provider=market_data_provider,
         market_data_status=market_data_status,
+        kraken_cli_status=kraken_cli_status,
         market_data_source_type=market_data_source_type,
         kraken_ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
         kraken_history_length=settings.kraken_history_length,
         warnings=warnings,
     )
     return market_provider, execution_provider, mode_state
+
+
+def _build_kraken_rest_provider(settings: Settings) -> KrakenPublicMarketDataProvider:
+    return KrakenPublicMarketDataProvider(
+        symbols=settings.symbols,
+        base_url=settings.kraken_base_url,
+        timeout_seconds=settings.kraken_timeout_seconds,
+        ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
+        history_length=settings.kraken_history_length,
+        user_agent=settings.kraken_user_agent,
+    )
+
+
+def _build_kraken_cli_provider(settings: Settings) -> KrakenCliMarketDataProvider:
+    return KrakenCliMarketDataProvider(
+        symbols=settings.symbols,
+        command_prefix=settings.kraken_cli_command,
+        timeout_seconds=settings.kraken_cli_timeout_seconds,
+        ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
+        history_length=settings.kraken_history_length,
+    )
+
+
+def _resolve_rest_market_provider(
+    settings: Settings,
+    warnings: list[str],
+) -> tuple[MarketDataProvider, str, str | None, str, str, str]:
+    try:
+        kraken_provider = _build_kraken_rest_provider(settings)
+        kraken_provider.ensure_available()
+    except KrakenMarketDataError as exc:
+        if settings.kraken_allow_fallback_to_mock:
+            warnings.append(
+                "Kraken public REST market data is unavailable "
+                f"({exc}). Using mock market data for this session."
+            )
+            return (
+                MockMarketDataProvider(settings.symbols),
+                MARKET_DATA_MODE_MOCK,
+                None,
+                "Mock Deterministic Demo",
+                MARKET_DATA_STATUS_FALLBACK_TO_MOCK,
+                "deterministic-demo",
+            )
+        warnings.append(
+            "Kraken public REST market data is unavailable "
+            f"({exc}). Fallback to mock is disabled, so engine runs are blocked."
+        )
+        return (
+            MockMarketDataProvider(settings.symbols),
+            "unavailable",
+            None,
+            "Kraken Public REST",
+            MARKET_DATA_STATUS_UNAVAILABLE,
+            "public-rest",
+        )
+
+    return (
+        kraken_provider,
+        MARKET_DATA_MODE_KRAKEN,
+        KRAKEN_BACKEND_REST,
+        kraken_provider.provider_name,
+        MARKET_DATA_STATUS_ACTIVE,
+        kraken_provider.source_type,
+    )
 
 
 def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
@@ -154,10 +268,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
 
     provider, executor, mode_state = resolve_runtime_components(settings)
     if mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE:
-        raise KrakenMarketDataError(
-            "Kraken public market data is unavailable and fallback to mock is disabled. "
-            "Aegis did not run this cycle."
-        )
+        raise KrakenMarketDataError(_unavailable_market_data_message(mode_state))
     strategy = RegimeStrategy()
     risk_engine = RiskEngine(settings)
     run_id = str(uuid4())
@@ -312,3 +423,15 @@ def _current_drawdown(connection, settings: Settings) -> float:
     market_value = get_total_market_value(connection)
     equity = cash_balance + market_value
     return max(0.0, (settings.starting_cash - equity) / settings.starting_cash)
+
+
+def _unavailable_market_data_message(mode_state: RuntimeModeState) -> str:
+    if mode_state.requested_kraken_backend == KRAKEN_BACKEND_CLI:
+        return (
+            "Kraken CLI market data is unavailable and no allowed fallback remained. "
+            "Aegis did not run this cycle."
+        )
+    return (
+        "Kraken public market data is unavailable and fallback to mock is disabled. "
+        "Aegis did not run this cycle."
+    )

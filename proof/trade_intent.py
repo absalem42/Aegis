@@ -53,12 +53,18 @@ def build_trade_intent(
         },
         "market_data": {
             "provider": mode_summary.get("market_data_provider"),
+            "backend": mode_summary.get("effective_kraken_backend"),
             "status": mode_summary.get("market_data_status"),
+            "kraken_cli_status": mode_summary.get("kraken_cli_status"),
             "source_type": mode_summary.get("market_data_source_type"),
             "ohlc_interval_minutes": mode_summary.get("kraken_ohlc_interval_minutes"),
             "history_length": mode_summary.get("kraken_history_length"),
+            "requested_kraken_backend": mode_summary.get("requested_kraken_backend"),
             "requested_market_data_mode": mode_summary.get("requested_market_data_mode"),
             "effective_market_data_mode": mode_summary.get("effective_market_data_mode"),
+            "requested_execution_mode": mode_summary.get("requested_execution_mode"),
+            "effective_execution_mode": mode_summary.get("effective_execution_mode"),
+            "observed_at": observed_at,
         },
         "modes": mode_summary,
     }

@@ -38,6 +38,7 @@ class KrakenPublicMarketDataProvider:
     """Kraken public REST market-data provider for safe paper-trading demos."""
 
     mode_name = "kraken"
+    backend_name = "rest"
     provider_name = "Kraken Public REST"
     source_type = "public-rest"
 

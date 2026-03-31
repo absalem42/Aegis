@@ -18,6 +18,9 @@ def test_build_agent_identity_includes_local_metadata(tmp_path):
             "effective_market_data_mode": "mock",
             "requested_execution_mode": "paper",
             "effective_execution_mode": "paper",
+            "requested_kraken_backend": None,
+            "effective_kraken_backend": None,
+            "kraken_cli_status": "NOT_REQUESTED",
         },
     )
 
@@ -56,6 +59,9 @@ def test_trade_intent_contains_agent_and_validation_metadata():
             "effective_market_data_mode": "mock",
             "requested_execution_mode": "paper",
             "effective_execution_mode": "paper",
+            "requested_kraken_backend": None,
+            "effective_kraken_backend": None,
+            "kraken_cli_status": "NOT_REQUESTED",
         },
         agent_identity={
             "agent_id": "aegis-demo",
@@ -70,6 +76,8 @@ def test_trade_intent_contains_agent_and_validation_metadata():
     assert payload["agent"]["agent_id"] == "aegis-demo"
     assert payload["signal"]["indicators"]["price"] == 69420.0
     assert payload["risk"]["summary"] == "ALLOWED"
+    assert payload["market_data"]["backend"] is None
+    assert payload["market_data"]["kraken_cli_status"] == "NOT_REQUESTED"
     assert payload["market_data"]["provider"] is None
     assert payload["validation_readiness"]["checks"]["has_agent_identity"] is True
 
