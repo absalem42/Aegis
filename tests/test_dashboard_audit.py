@@ -1,5 +1,6 @@
 from dashboard.audit import (
     build_decision_chains,
+    build_proof_summary,
     format_decision_chain_rows,
     format_decision_chain_summary,
     format_artifact_rows,
@@ -7,8 +8,10 @@ from dashboard.audit import (
     format_latest_artifact_summary,
     format_run_detail,
     format_run_history_rows,
+    format_selected_run_caption,
     format_signal_rows,
     format_trade_rows,
+    scope_records_to_run,
 )
 
 
@@ -184,3 +187,129 @@ def test_build_decision_chains_links_executed_and_blocked_paths():
 
     assert latest_summary["risk_allowed"] is False
     assert row_summary[1]["trade_status"] == "FILLED"
+
+
+def test_scope_records_to_run_prefers_run_id_and_time_window():
+    run_history = format_run_history_rows(
+        [
+            {
+                "id": "run-new",
+                "ts": "2026-03-31T00:02:00Z",
+                "status": "COMPLETED",
+                "summary_json": '{"signal_count": 2, "executed_count": 1, "blocked_count": 1, "artifact_count": 1, "latest_prices": {"BTC/USD": 69420}, "metrics": {"ending_cash": 90000}}',
+            },
+            {
+                "id": "run-old",
+                "ts": "2026-03-31T00:01:00Z",
+                "status": "COMPLETED",
+                "summary_json": '{"signal_count": 1, "executed_count": 1, "blocked_count": 0, "artifact_count": 1, "latest_prices": {"ETH/USD": 3210}, "metrics": {"ending_cash": 95000}}',
+            },
+        ]
+    )
+    signals = [
+        {
+            "ts": "2026-03-31T00:01:30Z",
+            "symbol": "BTC/USD",
+            "action": "BUY",
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "indicator_json": '{"price": 69420}',
+            "should_execute": 1,
+        },
+        {
+            "ts": "2026-03-31T00:00:30Z",
+            "symbol": "ETH/USD",
+            "action": "BUY",
+            "reason": "EMA_BULLISH_PULLBACK",
+            "indicator_json": '{"price": 3210}',
+            "should_execute": 1,
+        },
+    ]
+    blocked = [
+        {
+            "ts": "2026-03-31T00:01:40Z",
+            "symbol": "SOL/USD",
+            "side": "SELL",
+            "attempted_quantity": 0.0,
+            "attempted_price": 149.25,
+            "block_reason": "INVALID_QUANTITY",
+            "context_json": '{"signal_reason": "EMA_BEARISH_BREAKDOWN", "risk_reason_codes": ["INVALID_QUANTITY"]}',
+        }
+    ]
+    trades = [
+        {
+            "ts": "2026-03-31T00:01:35Z",
+            "symbol": "BTC/USD",
+            "side": "BUY",
+            "quantity": 0.1,
+            "price": 69420,
+            "notional": 6942,
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "status": "FILLED",
+            "pnl": 0.0,
+            "artifact_id": "artifact-new",
+        },
+        {
+            "ts": "2026-03-31T00:00:40Z",
+            "symbol": "ETH/USD",
+            "side": "BUY",
+            "quantity": 1.0,
+            "price": 3210,
+            "notional": 3210,
+            "reason": "EMA_BULLISH_PULLBACK",
+            "status": "FILLED",
+            "pnl": 0.0,
+            "artifact_id": "artifact-old",
+        },
+    ]
+    artifacts = [
+        {
+            "id": "artifact-new",
+            "ts": "2026-03-31T00:01:34Z",
+            "artifact_type": "TradeIntent",
+            "subject": "BTC/USD",
+            "payload_json": '{"run_id": "run-new", "symbol": "BTC/USD", "side": "BUY", "quantity": 0.1, "price": 69420, "reason": "EMA_BULLISH_BREAKOUT", "risk": {"allowed": true, "reason_codes": []}}',
+            "hash_or_digest": "abcdef1234567890abcdef1234567890",
+            "path": "artifacts/2026-03-31/artifact-new.json",
+        },
+        {
+            "id": "artifact-old",
+            "ts": "2026-03-31T00:00:39Z",
+            "artifact_type": "TradeIntent",
+            "subject": "ETH/USD",
+            "payload_json": '{"run_id": "run-old", "symbol": "ETH/USD", "side": "BUY", "quantity": 1.0, "price": 3210, "reason": "EMA_BULLISH_PULLBACK", "risk": {"allowed": true, "reason_codes": []}}',
+            "hash_or_digest": "fedcba0987654321fedcba0987654321",
+            "path": "artifacts/2026-03-31/artifact-old.json",
+        },
+    ]
+
+    scoped = scope_records_to_run(run_history, "run-new", signals, blocked, trades, artifacts)
+
+    assert scoped["selected_run"]["run_id"] == "run-new"
+    assert len(scoped["trades"]) == 1
+    assert scoped["trades"][0]["artifact_id"] == "artifact-new"
+    assert len(scoped["artifacts"]) == 1
+    assert scoped["artifacts"][0]["id"] == "artifact-new"
+    assert len(scoped["blocked_trades"]) == 1
+    assert len(scoped["signals"]) == 1
+
+
+def test_proof_summary_and_selected_run_caption_are_human_readable():
+    run = {
+        "run_id": "run-new",
+        "run_id_short": "run-new",
+        "ts": "2026-03-31T00:02:00Z",
+        "status": "COMPLETED",
+        "signal_count": 2,
+        "executed_count": 1,
+        "blocked_count": 1,
+        "artifact_count": 1,
+        "latest_prices": {"BTC/USD": 69420, "ETH/USD": 3210},
+        "metrics": {"ending_cash": 90000},
+    }
+
+    summary = build_proof_summary(run)
+    caption = format_selected_run_caption(run)
+
+    assert summary["artifact_count"] == 1
+    assert "audit" in summary["why_it_matters"].lower()
+    assert "run-new" in caption

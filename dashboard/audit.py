@@ -266,6 +266,71 @@ def build_decision_chains(
     return chains[:limit]
 
 
+def scope_records_to_run(
+    run_history_rows: list[dict[str, Any]],
+    selected_run_id: str,
+    signal_rows: list[dict[str, Any]],
+    blocked_trade_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    artifact_rows: list[dict[str, Any]],
+    decision_chain_limit: int = 5,
+) -> dict[str, Any]:
+    selected_run = next((row for row in run_history_rows if row.get("run_id") == selected_run_id), None)
+    if selected_run is None:
+        return {
+            "selected_run": None,
+            "signals": [],
+            "blocked_trades": [],
+            "trades": [],
+            "artifacts": [],
+            "decision_chains": [],
+            "latest_artifact": None,
+        }
+
+    start_ts, end_ts = _run_time_window(run_history_rows, selected_run_id)
+    scoped_artifacts = _scope_artifacts_to_run(artifact_rows, selected_run_id, start_ts, end_ts)
+    artifact_ids = {row.get("id") for row in scoped_artifacts if row.get("id")}
+    scoped_trades = _scope_trades_to_run(trade_rows, artifact_ids, start_ts, end_ts)
+    scoped_blocked = _filter_rows_by_time_window(blocked_trade_rows, start_ts, end_ts)
+    scoped_signals = _filter_rows_by_time_window(signal_rows, start_ts, end_ts)
+    scoped_chains = build_decision_chains(
+        signal_rows=scoped_signals,
+        blocked_trade_rows=scoped_blocked,
+        trade_rows=scoped_trades,
+        artifact_rows=scoped_artifacts,
+        limit=decision_chain_limit,
+    )
+
+    return {
+        "selected_run": selected_run,
+        "signals": scoped_signals,
+        "blocked_trades": scoped_blocked,
+        "trades": scoped_trades,
+        "artifacts": scoped_artifacts,
+        "decision_chains": scoped_chains,
+        "latest_artifact": scoped_artifacts[0] if scoped_artifacts else None,
+        "scoping_note": (
+            "Best-effort run scoping uses artifact run_id when available and timestamp windows for related signals and blocked trades."
+        ),
+    }
+
+
+def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not selected_run:
+        return None
+    prices = selected_run.get("latest_prices", {})
+    return {
+        "signal_count": selected_run.get("signal_count", 0),
+        "executed_count": selected_run.get("executed_count", 0),
+        "blocked_count": selected_run.get("blocked_count", 0),
+        "artifact_count": selected_run.get("artifact_count", 0),
+        "observed_prices": prices,
+        "why_it_matters": (
+            "This run preserves a local trail from signal to risk decision to artifact and final outcome, making the demo easier to audit."
+        ),
+    }
+
+
 def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
     signal = chain.get("signal", {})
     risk = chain.get("risk", {})
@@ -311,6 +376,15 @@ def format_decision_chain_rows(chains: list[dict[str, Any]]) -> list[dict[str, A
     ]
 
 
+def format_selected_run_caption(selected_run: dict[str, Any] | None) -> str:
+    if not selected_run:
+        return "No run selected."
+    return (
+        f"Selected run {selected_run['run_id_short']} at {selected_run['ts']}. "
+        "Views below are scoped to this run where reconstruction is reliable."
+    )
+
+
 def _match_signal(
     signals: list[dict[str, Any]],
     symbol: str | None,
@@ -329,6 +403,73 @@ def _match_signal(
         return None
     candidates.sort(key=lambda row: abs((_parse_ts(row.get("ts")) - target_ts).total_seconds()))
     return candidates[0]
+
+
+def _run_time_window(run_history_rows: list[dict[str, Any]], selected_run_id: str) -> tuple[datetime | None, datetime]:
+    selected_index = next(
+        (index for index, row in enumerate(run_history_rows) if row.get("run_id") == selected_run_id),
+        None,
+    )
+    if selected_index is None:
+        return None, datetime.min
+
+    selected_run = run_history_rows[selected_index]
+    end_ts = _parse_ts(selected_run.get("ts"))
+    older_run = run_history_rows[selected_index + 1] if selected_index + 1 < len(run_history_rows) else None
+    start_ts = _parse_ts(older_run.get("ts")) if older_run else None
+    return start_ts, end_ts
+
+
+def _filter_rows_by_time_window(
+    rows: list[dict[str, Any]],
+    start_ts: datetime | None,
+    end_ts: datetime,
+) -> list[dict[str, Any]]:
+    filtered = []
+    for row in rows:
+        row_ts = _parse_ts(row.get("ts"))
+        if row_ts <= end_ts and (start_ts is None or row_ts > start_ts):
+            filtered.append(row)
+    return filtered
+
+
+def _scope_artifacts_to_run(
+    artifact_rows: list[dict[str, Any]],
+    run_id: str,
+    start_ts: datetime | None,
+    end_ts: datetime,
+) -> list[dict[str, Any]]:
+    matched = []
+    fallback = []
+    for row in artifact_rows:
+        payload = _loads_json(row.get("payload_json"))
+        row_ts = _parse_ts(row.get("ts"))
+        if payload.get("run_id") == run_id:
+            matched.append(row)
+        elif row_ts <= end_ts and (start_ts is None or row_ts > start_ts):
+            fallback.append(row)
+    rows = matched if matched else fallback
+    rows.sort(key=lambda row: _parse_ts(row.get("ts")), reverse=True)
+    return rows
+
+
+def _scope_trades_to_run(
+    trade_rows: list[dict[str, Any]],
+    artifact_ids: set[Any],
+    start_ts: datetime | None,
+    end_ts: datetime,
+) -> list[dict[str, Any]]:
+    matched = []
+    fallback = []
+    for row in trade_rows:
+        row_ts = _parse_ts(row.get("ts"))
+        if row.get("artifact_id") in artifact_ids and row.get("artifact_id") is not None:
+            matched.append(row)
+        elif row_ts <= end_ts and (start_ts is None or row_ts > start_ts):
+            fallback.append(row)
+    rows = matched if matched else fallback
+    rows.sort(key=lambda row: _parse_ts(row.get("ts")), reverse=True)
+    return rows
 
 
 def _signal_summary(row: dict[str, Any] | None) -> dict[str, Any]:

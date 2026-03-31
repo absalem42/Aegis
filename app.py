@@ -5,7 +5,7 @@ import streamlit as st
 
 from config import load_settings
 from dashboard.audit import (
-    build_decision_chains,
+    build_proof_summary,
     format_decision_chain_rows,
     format_decision_chain_summary,
     format_artifact_rows,
@@ -14,8 +14,10 @@ from dashboard.audit import (
     format_run_detail,
     format_run_history_rows,
     format_run_option_labels,
+    format_selected_run_caption,
     format_signal_rows,
     format_trade_rows,
+    scope_records_to_run,
 )
 from dashboard.metrics import build_dashboard_metrics
 from db import (
@@ -114,13 +116,8 @@ def main() -> None:
         trade_rows = format_trade_rows(trades)
         artifact_rows = format_artifact_rows(artifacts)
         run_history_rows = format_run_history_rows(agent_runs)
-        decision_chains = build_decision_chains(
-            signal_rows=signals,
-            blocked_trade_rows=blocked,
-            trade_rows=trades,
-            artifact_rows=artifacts,
-            limit=5,
-        )
+        selected_run_scope = None
+        decision_chains = []
 
     metrics = build_dashboard_metrics(daily_metrics)
     st.markdown("### Local Status")
@@ -162,12 +159,29 @@ def main() -> None:
 
         run_labels = format_run_option_labels(run_history_rows)
         selected_label = st.selectbox(
-            "Inspect a recent run",
+            "Select a recent run",
             options=run_labels,
             index=0,
         )
         selected_run = run_history_rows[run_labels.index(selected_label)]
+        selected_run_scope = scope_records_to_run(
+            run_history_rows=run_history_rows,
+            selected_run_id=selected_run["run_id"],
+            signal_rows=signals,
+            blocked_trade_rows=blocked,
+            trade_rows=trades,
+            artifact_rows=artifacts,
+            decision_chain_limit=5,
+        )
+        decision_chains = selected_run_scope["decision_chains"]
+        signal_rows = format_signal_rows(selected_run_scope["signals"])
+        blocked_rows = format_blocked_trade_rows(selected_run_scope["blocked_trades"])
+        trade_rows = format_trade_rows(selected_run_scope["trades"])
+        artifact_rows = format_artifact_rows(selected_run_scope["artifacts"])
+        latest_artifact = selected_run_scope["latest_artifact"]
         run_detail = format_run_detail(selected_run)
+        proof_summary = build_proof_summary(selected_run)
+        st.caption(format_selected_run_caption(selected_run))
         if run_detail:
             detail_left, detail_right = st.columns(2)
             with detail_left:
@@ -191,11 +205,24 @@ def main() -> None:
                         "metrics_snapshot": run_detail["metrics_snapshot"],
                     }
                 )
+        if proof_summary:
+            st.subheader("Proof-Oriented Summary")
+            st.caption("Select a run, inspect its decision chain, then review the artifact and final outcome.")
+            proof_cols = st.columns(5)
+            proof_cols[0].metric("Signals", proof_summary["signal_count"])
+            proof_cols[1].metric("Executed", proof_summary["executed_count"])
+            proof_cols[2].metric("Blocked", proof_summary["blocked_count"])
+            proof_cols[3].metric("Artifacts", proof_summary["artifact_count"])
+            proof_cols[4].metric("Observed Prices", len(proof_summary["observed_prices"]))
+            st.write(proof_summary["why_it_matters"])
+            st.json({"observed_prices": proof_summary["observed_prices"]})
+        if selected_run_scope:
+            st.caption(selected_run_scope["scoping_note"])
     else:
         st.info("No agent runs yet. Run one engine cycle or reseed the demo state to populate run history.")
 
     st.markdown("### Latest Decision Chain")
-    st.caption("Compact explanation of how the latest meaningful signal flowed through risk, artifact creation, and execution.")
+    st.caption("Compact explanation of how the selected run's meaningful signal flowed through risk, artifact creation, and execution.")
     if decision_chains:
         latest_chain = decision_chains[0]
         latest_summary = format_decision_chain_summary(latest_chain)
@@ -245,7 +272,7 @@ def main() -> None:
         _show_table(
             "Latest Signals",
             signal_rows,
-            "No signals yet. Run one engine cycle or reseed the demo state.",
+            "No signals found for the selected run. Try another run or reseed the demo state.",
         )
 
     st.markdown("### Portfolio and Execution")
@@ -260,7 +287,7 @@ def main() -> None:
         _show_table(
             "Recent Trades",
             trade_rows,
-            "No trades yet. Run one engine cycle to generate paper executions.",
+            "No executed trades found for the selected run.",
         )
 
     left, right = st.columns(2)
@@ -268,7 +295,7 @@ def main() -> None:
         _show_table(
             "Recent Blocked Trades",
             blocked_rows,
-            "No blocked trades yet. Risk checks have not rejected any actions in this state.",
+            "No blocked trades found for the selected run.",
         )
     with right:
         st.subheader("Latest Artifact")
@@ -291,13 +318,13 @@ def main() -> None:
                 }
             )
         else:
-            st.info("No artifacts yet. Execute or reseed to create a local proof artifact.")
+            st.info("No artifacts found for the selected run.")
 
     st.markdown("### Artifact History")
     if artifact_rows:
         st.dataframe(_frame(artifact_rows), use_container_width=True)
     else:
-        st.info("Artifact history is empty. Reseed the demo state to populate this view.")
+        st.info("Artifact history is empty for the selected run.")
 
 
 if __name__ == "__main__":
