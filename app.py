@@ -5,6 +5,9 @@ import streamlit as st
 
 from config import load_settings
 from dashboard.audit import (
+    build_decision_chains,
+    format_decision_chain_rows,
+    format_decision_chain_summary,
     format_artifact_rows,
     format_blocked_trade_rows,
     format_latest_artifact_summary,
@@ -111,6 +114,13 @@ def main() -> None:
         trade_rows = format_trade_rows(trades)
         artifact_rows = format_artifact_rows(artifacts)
         run_history_rows = format_run_history_rows(agent_runs)
+        decision_chains = build_decision_chains(
+            signal_rows=signals,
+            blocked_trade_rows=blocked,
+            trade_rows=trades,
+            artifact_rows=artifacts,
+            limit=5,
+        )
 
     metrics = build_dashboard_metrics(daily_metrics)
     st.markdown("### Local Status")
@@ -183,6 +193,46 @@ def main() -> None:
                 )
     else:
         st.info("No agent runs yet. Run one engine cycle or reseed the demo state to populate run history.")
+
+    st.markdown("### Latest Decision Chain")
+    st.caption("Compact explanation of how the latest meaningful signal flowed through risk, artifact creation, and execution.")
+    if decision_chains:
+        latest_chain = decision_chains[0]
+        latest_summary = format_decision_chain_summary(latest_chain)
+        signal_col, risk_col, artifact_col, execution_col = st.columns(4)
+        with signal_col:
+            st.subheader("Signal")
+            st.write(f"Symbol: `{latest_summary['symbol']}`")
+            st.write(f"Action: `{latest_summary['action']}`")
+            st.write(f"Reason: `{latest_summary['signal_reason']}`")
+            st.write(
+                f"Indicators: price `{latest_summary['price']}`, "
+                f"ema20 `{latest_summary['ema20']}`, ema50 `{latest_summary['ema50']}`"
+            )
+        with risk_col:
+            st.subheader("Risk")
+            st.write(f"Allowed: `{latest_summary['risk_allowed']}`")
+            st.write(f"Summary: `{latest_summary['risk_summary']}`")
+            st.write(f"Reason codes: `{latest_summary['risk_reason_codes'] or 'None'}`")
+        with artifact_col:
+            st.subheader("Artifact")
+            st.write(f"Artifact id: `{latest_summary['artifact_id'] or 'Not created'}`")
+            st.write(f"Path: `{latest_summary['artifact_path'] or 'N/A'}`")
+            st.write(f"Short hash: `{latest_summary['artifact_hash'] or 'N/A'}`")
+        with execution_col:
+            st.subheader("Execution Outcome")
+            st.write(f"Status: `{latest_summary['trade_status']}`")
+            st.write(f"Quantity: `{latest_summary['quantity']}`")
+            st.write(f"Price: `{latest_summary['price_executed']}`")
+            st.write(f"PnL: `{latest_summary['pnl']}`")
+
+        with st.expander("Latest Decision Chain Details", expanded=False):
+            st.json(latest_chain)
+
+        st.subheader("Recent Decision Chains")
+        st.dataframe(_frame(format_decision_chain_rows(decision_chains)), use_container_width=True)
+    else:
+        st.info("No decision chain available yet. Run one engine cycle or reseed the demo state.")
 
     st.markdown("### Market and Signals")
     left, right = st.columns(2)

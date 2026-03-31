@@ -1,4 +1,7 @@
 from dashboard.audit import (
+    build_decision_chains,
+    format_decision_chain_rows,
+    format_decision_chain_summary,
     format_artifact_rows,
     format_blocked_trade_rows,
     format_latest_artifact_summary,
@@ -110,3 +113,74 @@ def test_artifact_and_trade_rows_are_demo_friendly():
     assert trade_rows[0]["artifact_id"] == "artifact-1"
     assert artifact_rows[0]["signal_reason"] == "EMA_BULLISH_PULLBACK"
     assert artifact_summary["risk_allowed"] is True
+
+
+def test_build_decision_chains_links_executed_and_blocked_paths():
+    signals = [
+        {
+            "ts": "2026-03-31T00:00:00Z",
+            "symbol": "BTC/USD",
+            "action": "BUY",
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "indicator_json": '{"price": 69420, "ema20": 68000, "ema50": 66000, "recent_high": 69000, "recent_low": 65000}',
+            "should_execute": 1,
+        },
+        {
+            "ts": "2026-03-31T00:01:00Z",
+            "symbol": "SOL/USD",
+            "action": "SELL",
+            "reason": "EMA_BEARISH_BREAKDOWN",
+            "indicator_json": '{"price": 149.25, "ema20": 155, "ema50": 160, "recent_high": 158, "recent_low": 150}',
+            "should_execute": 1,
+        },
+    ]
+    trades = [
+        {
+            "ts": "2026-03-31T00:00:05Z",
+            "symbol": "BTC/USD",
+            "side": "BUY",
+            "quantity": 0.1,
+            "price": 69420,
+            "notional": 6942,
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "status": "FILLED",
+            "pnl": 0.0,
+            "artifact_id": "artifact-1",
+        }
+    ]
+    blocked = [
+        {
+            "ts": "2026-03-31T00:01:05Z",
+            "symbol": "SOL/USD",
+            "side": "SELL",
+            "attempted_quantity": 0.0,
+            "attempted_price": 149.25,
+            "block_reason": "INVALID_QUANTITY, NO_OPEN_POSITION",
+            "context_json": '{"signal_reason": "EMA_BEARISH_BREAKDOWN", "risk_reason_codes": ["INVALID_QUANTITY", "NO_OPEN_POSITION"], "indicators": {"price": 149.25, "ema20": 155, "ema50": 160}}',
+        }
+    ]
+    artifacts = [
+        {
+            "id": "artifact-1",
+            "ts": "2026-03-31T00:00:04Z",
+            "artifact_type": "TradeIntent",
+            "subject": "BTC/USD",
+            "payload_json": '{"symbol": "BTC/USD", "side": "BUY", "quantity": 0.1, "price": 69420, "reason": "EMA_BULLISH_BREAKOUT", "risk": {"allowed": true, "reason_codes": []}}',
+            "hash_or_digest": "abcdef1234567890abcdef1234567890",
+            "path": "artifacts/2026-03-31/artifact-1.json",
+        }
+    ]
+
+    chains = build_decision_chains(signals, blocked, trades, artifacts, limit=5)
+
+    assert len(chains) == 2
+    assert chains[0]["outcome"] == "BLOCKED"
+    assert chains[1]["outcome"] == "EXECUTED"
+    assert chains[1]["artifact"]["artifact_id"] == "artifact-1"
+    assert chains[0]["artifact"]["created"] is False
+
+    latest_summary = format_decision_chain_summary(chains[0])
+    row_summary = format_decision_chain_rows(chains)
+
+    assert latest_summary["risk_allowed"] is False
+    assert row_summary[1]["trade_status"] == "FILLED"

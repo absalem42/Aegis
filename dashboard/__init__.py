@@ -1,4 +1,7 @@
 from .audit import (
+    build_decision_chains,
+    format_decision_chain_rows,
+    format_decision_chain_summary,
     format_artifact_rows,
     format_blocked_trade_rows,
     format_latest_artifact_summary,
@@ -12,6 +15,9 @@ from .metrics import build_dashboard_metrics
 
 __all__ = [
     "build_dashboard_metrics",
+    "build_decision_chains",
+    "format_decision_chain_rows",
+    "format_decision_chain_summary",
     "format_artifact_rows",
     "format_blocked_trade_rows",
     "format_latest_artifact_summary",
