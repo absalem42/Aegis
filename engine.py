@@ -102,7 +102,7 @@ def resolve_runtime_components(
     market_data_provider = "Mock Deterministic Demo"
     market_data_status = MARKET_DATA_STATUS_NOT_REQUESTED
     kraken_cli_status = KRAKEN_CLI_STATUS_NOT_REQUESTED
-    market_data_source_type = "deterministic-demo"
+    market_data_source_type = "mock"
 
     if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
         requested_kraken_backend = settings.kraken_backend
@@ -141,7 +141,7 @@ def resolve_runtime_components(
                     market_data_provider = "Mock Deterministic Demo"
                     market_data_status = MARKET_DATA_STATUS_FALLBACK_TO_MOCK
                     kraken_cli_status = KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK
-                    market_data_source_type = "deterministic-demo"
+                    market_data_source_type = "mock"
                 else:
                     warnings.append(
                         "Kraken CLI market data is unavailable "
@@ -236,7 +236,7 @@ def _resolve_rest_market_provider(
                 None,
                 "Mock Deterministic Demo",
                 MARKET_DATA_STATUS_FALLBACK_TO_MOCK,
-                "deterministic-demo",
+                "mock",
             )
         warnings.append(
             "Kraken public REST market data is unavailable "

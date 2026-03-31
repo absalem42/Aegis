@@ -44,6 +44,7 @@ In practice:
 - The engine applies simple trading logic and coordination.
 - The broker layer handles paper execution decisions.
 - SQLite stores durable local state.
+- A local evaluation/reporting layer may run multiple engine cycles, read the resulting state, and save JSON reports without changing the core trading path.
 
 ## Market Data Interface Boundary
 

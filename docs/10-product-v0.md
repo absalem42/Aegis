@@ -26,6 +26,7 @@ Deliver a local paper-trading demo for a single operator, not a live trading sys
 - SQLite persistence
 - Paper trading only
 - Local recording of simple trust/proof artifact records
+- Local evaluation reports and a transparent internal scorecard
 - Readable, hackathon-friendly structure for one primary operator
 
 ## Out of Scope
@@ -45,6 +46,7 @@ v0 is successful when all of the following are true:
 - Demo data can be created, reset, or reseeded locally.
 - Paper trades and positions persist in SQLite.
 - The dashboard clearly exposes the current local state.
+- Local evaluations can be run and compared safely.
 - The project remains understandable and easy to extend during the hackathon.
 
 ## Boundary Reminder

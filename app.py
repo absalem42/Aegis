@@ -42,6 +42,14 @@ from db import (
     reset_runtime_state,
     upsert_daily_metrics,
 )
+from evaluation import (
+    build_provider_capabilities_summary,
+    format_evaluation_comparison_rows,
+    format_evaluation_history_rows,
+    list_evaluation_reports,
+    load_latest_evaluation_report,
+    run_evaluation,
+)
 from engine import (
     MARKET_DATA_STATUS_ACTIVE,
     MARKET_DATA_STATUS_FALLBACK_TO_MOCK,
@@ -108,6 +116,12 @@ def _backend_label(value: str | None) -> str:
     if not value:
         return "N/A"
     return KRAKEN_BACKEND_LABELS.get(value, value.upper())
+
+
+def _ratio_label(value: float | None) -> str:
+    if value is None:
+        return "N/A"
+    return f"{value:.0%}"
 
 
 def main() -> None:
@@ -196,6 +210,68 @@ def main() -> None:
                 )
             st.rerun()
 
+        st.divider()
+        st.header("Evaluation")
+        st.caption("Run a local paper-only evaluation and save a judge-friendly report under `reports/`.")
+        evaluation_market_data_mode = st.selectbox(
+            "Evaluation market data mode",
+            options=[MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN],
+            index=[MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN].index(base_settings.market_data_mode),
+            format_func=lambda value: MARKET_MODE_LABELS[value],
+            key="evaluation_market_data_mode",
+        )
+        evaluation_kraken_backend = base_settings.kraken_backend
+        if evaluation_market_data_mode == MARKET_DATA_MODE_KRAKEN:
+            evaluation_kraken_backend = st.selectbox(
+                "Evaluation Kraken backend",
+                options=[KRAKEN_BACKEND_REST, KRAKEN_BACKEND_CLI],
+                index=[KRAKEN_BACKEND_REST, KRAKEN_BACKEND_CLI].index(base_settings.kraken_backend),
+                format_func=lambda value: KRAKEN_BACKEND_LABELS[value],
+                key="evaluation_kraken_backend",
+            )
+        evaluation_cycles = int(
+            st.number_input("Evaluation cycles", min_value=1, max_value=25, value=5, step=1)
+        )
+        evaluation_label = st.text_input("Evaluation label", value="")
+        evaluation_reset_first = st.checkbox("Reset before evaluation", value=True)
+        evaluation_settings = replace(
+            base_settings,
+            market_data_mode=evaluation_market_data_mode,
+            kraken_backend=evaluation_kraken_backend,
+            execution_mode=EXECUTION_MODE_PAPER,
+        )
+        _evaluation_provider, _evaluation_executor, evaluation_mode_state = resolve_runtime_components(
+            evaluation_settings
+        )
+        evaluation_blocked = (
+            evaluation_mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
+        )
+        if evaluation_blocked:
+            st.error("The selected evaluation data source is unavailable and no safe fallback remains.")
+        st.caption("Execution stays paper-only during evaluation. This score is local and not the official leaderboard.")
+        if st.button(
+            "Run Evaluation",
+            use_container_width=True,
+            disabled=evaluation_blocked,
+        ):
+            try:
+                report = run_evaluation(
+                    evaluation_settings,
+                    cycles=evaluation_cycles,
+                    reset_first=evaluation_reset_first,
+                    label=evaluation_label or None,
+                )
+            except KrakenMarketDataError as exc:
+                st.session_state.aegis_notice = ("error", str(exc))
+            else:
+                st.session_state.aegis_notice = (
+                    "success",
+                    f"Evaluation {report['label']} completed: "
+                    f"score {report['scorecard']['score']}, "
+                    f"total PnL {report['metrics']['total_pnl']:.2f}.",
+                )
+            st.rerun()
+
     latest_prices: dict[str, float] = {}
     if not runs_blocked:
         try:
@@ -246,6 +322,9 @@ def main() -> None:
     agent_identity_summary = build_agent_identity_summary(settings, mode_state.to_dict())
     latest_linked_trade = trades[0] if trades else None
     trust_readiness_summary = build_trust_readiness_summary(latest_artifact, latest_linked_trade)
+    evaluation_reports = list_evaluation_reports(settings, limit=10)
+    latest_evaluation_report = load_latest_evaluation_report(settings)
+    provider_capabilities = build_provider_capabilities_summary()
 
     st.markdown("### Local Status")
     mode_cols = st.columns(6)
@@ -304,6 +383,80 @@ def main() -> None:
             st.json({"checks": trust_readiness_summary["checks"]})
         else:
             st.info("No trust artifact yet. Run one engine cycle or reseed the demo state.")
+
+    st.markdown("### Provider Capabilities")
+    st.caption("Source quality is explicit: mock is deterministic, Kraken REST is public exchange data, Kraken CLI is optional and local, and execution remains paper-only.")
+    st.dataframe(_frame(provider_capabilities), use_container_width=True)
+
+    st.markdown("### Evaluation Summary")
+    st.caption("Local/internal score only. It is intended for transparent comparison inside Aegis and is not the official leaderboard.")
+    if latest_evaluation_report:
+        latest_metrics = latest_evaluation_report["metrics"]
+        latest_scorecard = latest_evaluation_report["scorecard"]
+        summary_cols = st.columns(6)
+        summary_cols[0].metric("Label", latest_evaluation_report["label"])
+        summary_cols[1].metric("Source Quality", latest_metrics["source_quality_indicator"])
+        summary_cols[2].metric("Local Score", f"{latest_scorecard['score']:.2f}")
+        summary_cols[3].metric("Total PnL", f"{latest_metrics['total_pnl']:.2f}")
+        summary_cols[4].metric("Max Drawdown", f"{latest_metrics['max_drawdown']:.2%}")
+        summary_cols[5].metric(
+            "Artifact Coverage",
+            _ratio_label(latest_metrics.get("artifact_coverage_for_executed_decisions")),
+        )
+        secondary_summary_cols = st.columns(4)
+        secondary_summary_cols[0].metric(
+            "Win Rate",
+            _ratio_label(latest_metrics.get("win_rate")),
+        )
+        secondary_summary_cols[1].metric(
+            "Profit Factor",
+            "N/A" if latest_metrics.get("profit_factor") is None else f"{latest_metrics['profit_factor']:.2f}",
+        )
+        secondary_summary_cols[2].metric(
+            "Avg Closed Trade PnL",
+            "N/A"
+            if latest_metrics.get("average_pnl_per_closed_trade") is None
+            else f"{latest_metrics['average_pnl_per_closed_trade']:.2f}",
+        )
+        secondary_summary_cols[3].metric("Executed / Blocked", f"{latest_metrics['executed_count']} / {latest_metrics['blocked_count']}")
+        st.write(latest_scorecard["caption"])
+        st.json(
+            {
+                "generated_at": latest_evaluation_report["generated_at"],
+                "requested_market_data_mode": latest_evaluation_report["requested_market_data_mode"],
+                "effective_market_data_mode": latest_evaluation_report["effective_market_data_mode"],
+                "requested_kraken_backend": _backend_label(latest_evaluation_report.get("requested_kraken_backend")),
+                "effective_kraken_backend": _backend_label(latest_evaluation_report.get("effective_kraken_backend")),
+                "requested_execution_mode": latest_evaluation_report["requested_execution_mode"],
+                "effective_execution_mode": latest_evaluation_report["effective_execution_mode"],
+                "market_data_provider": latest_evaluation_report["market_data_provider"],
+                "market_data_source_type": latest_evaluation_report["market_data_source_type"],
+                "kraken_cli_status": latest_evaluation_report["kraken_cli_status"],
+                "proof_summary": latest_evaluation_report["proof_summary"],
+                "score_formula": latest_scorecard["formula"],
+                "report_path": latest_evaluation_report.get("report_path"),
+            }
+        )
+    else:
+        st.info("No evaluation report yet. Use the sidebar to run a local evaluation.")
+
+    st.markdown("### Evaluation Report History")
+    if evaluation_reports:
+        st.dataframe(
+            _frame(format_evaluation_history_rows(evaluation_reports)),
+            use_container_width=True,
+        )
+    else:
+        st.info("No saved evaluation reports yet.")
+
+    st.markdown("### Evaluation Comparison")
+    if evaluation_reports:
+        st.dataframe(
+            _frame(format_evaluation_comparison_rows(evaluation_reports[:5])),
+            use_container_width=True,
+        )
+    else:
+        st.info("Run a few evaluations to compare source quality, PnL, drawdown, artifact coverage, and local score.")
 
     st.markdown("### Trading Metrics")
     metric_cols = st.columns(4)

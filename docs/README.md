@@ -27,6 +27,7 @@ If code and docs drift, treat that as a documentation defect to fix quickly.
 - The repository is being scaffolded.
 - v0 is a local paper-trading demo only.
 - Kraken public market data is supported.
+- Local evaluation reports and internal scorecards are supported.
 - Kraken execution is future-facing only.
 - ERC-8004 trust/proof support is future-facing only.
 - The near-term priority is a simple, readable, solo-hackathon-friendly codebase.

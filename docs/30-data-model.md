@@ -108,6 +108,7 @@ If added later, they should remain clearly justified and not complicate the mini
 - Local development should support resetting demo data safely.
 - Seeding should produce predictable demo states for testing and demos.
 - Reset and seed behavior should be explicit and easy to understand.
+- Local evaluation reports may be stored as JSON files under `reports/` rather than new SQLite tables.
 
 ## Migration Policy
 

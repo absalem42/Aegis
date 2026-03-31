@@ -32,6 +32,8 @@ These commands are the intended workflow once the corresponding project files ex
 streamlit run app.py
 ```
 
+Use the dashboard controls to run local evaluations and save reports under `reports/`.
+
 ## Standard Test Commands
 
 ```powershell

@@ -63,6 +63,7 @@ def _parse_capabilities(value: str | None) -> Tuple[str, ...]:
 class Settings:
     db_path: Path = Path(os.getenv("AEGIS_DB_PATH", "data/aegis.db"))
     artifact_dir: Path = Path(os.getenv("AEGIS_ARTIFACT_DIR", "artifacts"))
+    report_dir: Path = Path(os.getenv("AEGIS_REPORT_DIR", "reports"))
     symbols: Tuple[str, ...] = ("BTC/USD", "ETH/USD", "SOL/USD")
     market_data_mode: str = MARKET_DATA_MODE_MOCK
     execution_mode: str = EXECUTION_MODE_PAPER
@@ -96,6 +97,7 @@ class Settings:
     def ensure_paths(self) -> None:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
+        self.report_dir.mkdir(parents=True, exist_ok=True)
 
 
 def load_settings() -> Settings:
@@ -103,6 +105,7 @@ def load_settings() -> Settings:
     settings = Settings(
         db_path=Path(os.getenv("AEGIS_DB_PATH", "data/aegis.db")),
         artifact_dir=Path(os.getenv("AEGIS_ARTIFACT_DIR", "artifacts")),
+        report_dir=Path(os.getenv("AEGIS_REPORT_DIR", "reports")),
         market_data_mode=_parse_market_data_mode(os.getenv("AEGIS_MARKET_DATA_MODE")),
         execution_mode=_parse_execution_mode(os.getenv("AEGIS_EXECUTION_MODE")),
         kraken_backend=_parse_kraken_backend(os.getenv("AEGIS_KRAKEN_BACKEND")),

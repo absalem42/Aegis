@@ -18,3 +18,4 @@ __pycache__/
 # Local runtime data
 data/*.db
 artifacts/
+reports/
