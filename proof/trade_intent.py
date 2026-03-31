@@ -19,6 +19,17 @@ def build_trade_intent(
 ) -> dict[str, Any]:
     observed_at = utc_now_iso()
     effective_execution_mode = str(mode_summary.get("effective_execution_mode", "paper"))
+    execution_snapshot = {
+        "provider": mode_summary.get("execution_provider"),
+        "status": mode_summary.get("execution_status"),
+        "source_type": mode_summary.get("execution_source_type"),
+        "requested_execution_mode": mode_summary.get("requested_execution_mode"),
+        "effective_execution_mode": mode_summary.get("effective_execution_mode"),
+        "requested_kraken_execution_mode": mode_summary.get("requested_kraken_execution_mode"),
+        "effective_kraken_execution_mode": mode_summary.get("effective_kraken_execution_mode"),
+        "live_readiness_status": mode_summary.get("live_readiness_status"),
+        "live_readiness": mode_summary.get("live_readiness"),
+    }
     payload = {
         "artifact_id": str(uuid4()),
         "artifact_type": "TradeIntent",
@@ -66,7 +77,9 @@ def build_trade_intent(
             "effective_execution_mode": mode_summary.get("effective_execution_mode"),
             "observed_at": observed_at,
         },
+        "execution": execution_snapshot,
         "modes": mode_summary,
+        "notes": "Pre-execution trade intent captured before any execution path runs.",
     }
     payload["validation_readiness"] = build_validation_readiness(payload, has_execution_outcome_linkage=False)
     return payload

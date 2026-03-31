@@ -58,9 +58,13 @@ In practice:
 ## Broker Interface Boundary
 
 - Treat order execution as an interface boundary.
-- v0 should have one concrete broker behavior: paper trading.
+- v0 now has two safe simulation paths:
+  - internal paper execution
+  - Kraken CLI paper execution
 - Execution logic should be isolated from Streamlit UI code.
-- Kraken-specific behavior belongs in a later adapter, not in the core engine.
+- Kraken-specific behavior belongs in an adapter, not in the core engine.
+- Kraken live execution remains a guarded readiness path and is blocked in this milestone.
+- A minimal local order lifecycle may be stored separately from fills so audit views can distinguish intents, orders, receipts, and trades.
 
 ## Trust Artifact Interface Boundary
 
@@ -72,7 +76,8 @@ In practice:
 ## Extension Points for Later
 
 - Kraken public market data can already plug into the market data boundary through REST or an optional official CLI backend.
-- Kraken execution still belongs in a later adapter behind the broker boundary.
+- Kraken CLI paper execution can already plug into the broker boundary as a simulation path.
+- Kraken live execution still belongs in a later guarded adapter flow behind the broker boundary.
 - ERC-8004 can later plug into artifact export or publishing paths.
 - These extension points should stay explicit but lightweight in v0.
 

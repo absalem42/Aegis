@@ -10,6 +10,8 @@ from config import (
     EXECUTION_MODE_PAPER,
     KRAKEN_BACKEND_CLI,
     KRAKEN_BACKEND_REST,
+    KRAKEN_EXECUTION_MODE_LIVE,
+    KRAKEN_EXECUTION_MODE_PAPER,
     MARKET_DATA_MODE_KRAKEN,
     MARKET_DATA_MODE_MOCK,
     load_settings,
@@ -23,6 +25,7 @@ from dashboard.audit import (
     format_artifact_rows,
     format_blocked_trade_rows,
     format_latest_artifact_summary,
+    format_order_rows,
     format_run_detail,
     format_run_history_rows,
     format_run_option_labels,
@@ -39,7 +42,6 @@ from db import (
     list_positions,
     list_recent,
     load_latest_artifact,
-    reset_runtime_state,
     upsert_daily_metrics,
 )
 from evaluation import (
@@ -61,7 +63,11 @@ from engine import (
     KRAKEN_CLI_STATUS_FALLBACK_TO_REST,
     KRAKEN_CLI_STATUS_NOT_REQUESTED,
     KRAKEN_CLI_STATUS_UNAVAILABLE,
+    EXECUTION_STATUS_ACTIVE,
+    EXECUTION_STATUS_BLOCKED,
+    EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER,
     reseed_demo_state,
+    reset_demo_state,
     resolve_runtime_components,
     run_engine_cycle,
 )
@@ -77,8 +83,12 @@ KRAKEN_BACKEND_LABELS = {
     KRAKEN_BACKEND_CLI: "Official Kraken CLI",
 }
 EXECUTION_MODE_LABELS = {
-    EXECUTION_MODE_PAPER: "Paper (safe local execution)",
-    EXECUTION_MODE_KRAKEN: "Kraken execution (stub, disabled)",
+    EXECUTION_MODE_PAPER: "Internal paper (safe default)",
+    EXECUTION_MODE_KRAKEN: "Kraken",
+}
+KRAKEN_EXECUTION_MODE_LABELS = {
+    KRAKEN_EXECUTION_MODE_PAPER: "Paper",
+    KRAKEN_EXECUTION_MODE_LIVE: "Live",
 }
 CLI_STATUS_LABELS = {
     KRAKEN_CLI_STATUS_ACTIVE: "ACTIVE",
@@ -86,6 +96,12 @@ CLI_STATUS_LABELS = {
     KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK: "FALLBACK TO MOCK",
     KRAKEN_CLI_STATUS_UNAVAILABLE: "UNAVAILABLE",
     KRAKEN_CLI_STATUS_NOT_REQUESTED: "NOT REQUESTED",
+}
+EXECUTION_STATUS_LABELS = {
+    EXECUTION_STATUS_ACTIVE: "ACTIVE",
+    EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER: "FALLBACK TO INTERNAL PAPER",
+    EXECUTION_STATUS_BLOCKED: "BLOCKED",
+    "NOT_REQUESTED": "NOT REQUESTED",
 }
 
 
@@ -158,6 +174,16 @@ def main() -> None:
             index=[EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN].index(base_settings.execution_mode),
             format_func=lambda value: EXECUTION_MODE_LABELS[value],
         )
+        kraken_execution_mode = base_settings.kraken_execution_mode
+        if execution_mode == EXECUTION_MODE_KRAKEN:
+            kraken_execution_mode = st.selectbox(
+                "Kraken execution mode",
+                options=[KRAKEN_EXECUTION_MODE_PAPER, KRAKEN_EXECUTION_MODE_LIVE],
+                index=[KRAKEN_EXECUTION_MODE_PAPER, KRAKEN_EXECUTION_MODE_LIVE].index(
+                    base_settings.kraken_execution_mode
+                ),
+                format_func=lambda value: KRAKEN_EXECUTION_MODE_LABELS[value],
+            )
         reseed_cycles = int(
             st.number_input("Reseed cycles", min_value=1, max_value=5, value=2, step=1)
         )
@@ -166,6 +192,7 @@ def main() -> None:
             market_data_mode=market_data_mode,
             execution_mode=execution_mode,
             kraken_backend=kraken_backend,
+            kraken_execution_mode=kraken_execution_mode,
         )
         provider, _executor, mode_state = resolve_runtime_components(settings)
         runs_blocked = mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
@@ -190,12 +217,16 @@ def main() -> None:
                 )
             st.rerun()
         if st.button("Reset Local State", use_container_width=True):
-            summary = reset_runtime_state(settings)
+            summary = reset_demo_state(settings)
+            warning_text = ""
+            if summary["warnings"]:
+                warning_text = " Warnings: " + " | ".join(summary["warnings"])
             st.session_state.aegis_notice = (
                 "warning",
                 "Local runtime state reset. "
-                f"DB reset: {summary['database_reset']}. "
-                f"Artifact entries removed: {summary['artifact_entries_removed']}.",
+                f"DB reset: {summary['local_reset']['database_reset']}. "
+                f"Artifact entries removed: {summary['local_reset']['artifact_entries_removed']}. "
+                f"Kraken paper reset: {bool(summary['execution_reset'])}.{warning_text}",
             )
             st.rerun()
         if st.button("Reseed Demo State", use_container_width=True, disabled=runs_blocked):
@@ -241,6 +272,7 @@ def main() -> None:
             market_data_mode=evaluation_market_data_mode,
             kraken_backend=evaluation_kraken_backend,
             execution_mode=EXECUTION_MODE_PAPER,
+            kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
         )
         _evaluation_provider, _evaluation_executor, evaluation_mode_state = resolve_runtime_components(
             evaluation_settings
@@ -297,6 +329,7 @@ def main() -> None:
         signals = list_recent(connection, "signals", limit=10)
         positions = list_positions(connection)
         trades = list_recent(connection, "trades", limit=10)
+        orders = list_recent(connection, "orders", limit=10)
         blocked = list_recent(connection, "blocked_trades", limit=10)
         artifacts = list_recent(connection, "artifacts", limit=10)
         agent_runs = list_recent(connection, "agent_runs", limit=10)
@@ -315,6 +348,7 @@ def main() -> None:
         signal_rows = format_signal_rows(signals)
         blocked_rows = format_blocked_trade_rows(blocked)
         trade_rows = format_trade_rows(trades)
+        order_rows = format_order_rows(orders)
         artifact_rows = format_artifact_rows(artifacts)
         run_history_rows = format_run_history_rows(agent_runs)
         selected_run_scope = None
@@ -338,12 +372,32 @@ def main() -> None:
     mode_cols[4].metric("Requested Kraken Backend", _backend_label(mode_state.requested_kraken_backend))
     mode_cols[5].metric("Effective Kraken Backend", _backend_label(mode_state.effective_kraken_backend))
 
-    status_cols = st.columns(5)
+    execution_cols = st.columns(4)
+    execution_cols[0].metric(
+        "Requested Kraken Exec",
+        mode_state.requested_kraken_execution_mode.upper()
+        if mode_state.requested_kraken_execution_mode
+        else "N/A",
+    )
+    execution_cols[1].metric(
+        "Effective Kraken Exec",
+        mode_state.effective_kraken_execution_mode.upper()
+        if mode_state.effective_kraken_execution_mode
+        else "N/A",
+    )
+    execution_cols[2].metric("Execution Provider", mode_state.execution_provider)
+    execution_cols[3].metric(
+        "Execution Status",
+        EXECUTION_STATUS_LABELS.get(mode_state.execution_status, mode_state.execution_status),
+    )
+
+    status_cols = st.columns(6)
     status_cols[0].metric("Kraken CLI Status", CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status))
     status_cols[1].metric("Kraken Data Status", mode_state.market_data_status.replace("_", " "))
-    status_cols[2].metric("Trades", f"{status_summary['trade_count']}")
-    status_cols[3].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
-    status_cols[4].metric("Open Positions", f"{status_summary['open_position_count']}")
+    status_cols[2].metric("Live Readiness", mode_state.live_readiness_status.replace("_", " "))
+    status_cols[3].metric("Orders", f"{status_summary['order_count']}")
+    status_cols[4].metric("Trades", f"{status_summary['trade_count']}")
+    status_cols[5].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
 
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
@@ -354,20 +408,25 @@ def main() -> None:
         st.write(f"Kraken CLI status: `{CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status)}`")
         st.write(f"Market data source type: `{mode_state.market_data_source_type}`")
         st.write(f"Kraken data status: `{mode_state.market_data_status}`")
-        st.write(f"Execution mode: `{mode_state.effective_execution_mode}`")
+        st.write(f"Requested Kraken execution mode: `{mode_state.requested_kraken_execution_mode or 'N/A'}`")
+        st.write(f"Effective Kraken execution mode: `{mode_state.effective_kraken_execution_mode or 'N/A'}`")
+        st.write(f"Execution provider: `{mode_state.execution_provider}`")
+        st.write(f"Execution source type: `{mode_state.execution_source_type}`")
+        st.write(f"Execution status: `{mode_state.execution_status}`")
+        st.write(f"Live readiness status: `{mode_state.live_readiness_status}`")
         st.write(f"Requested market data mode: `{mode_state.requested_market_data_mode}`")
         st.write(f"Requested execution mode: `{mode_state.requested_execution_mode}`")
+        st.json({"live_readiness": mode_state.live_readiness})
 
     st.markdown("### Readiness Status")
     st.caption(
-        "Kraken public market data can feed the strategy through REST or the official Kraken CLI. "
-        "Execution remains local paper execution in this milestone."
+        "Internal paper is the safest default. Kraken CLI paper uses the official CLI paper suite. Kraken live is planned and guarded, but not enabled in this milestone."
     )
     readiness_cols = st.columns(4)
     readiness_cols[0].metric("Market Provider", mode_state.market_data_provider)
     readiness_cols[1].metric("Kraken Backend", _backend_label(mode_state.effective_kraken_backend))
-    readiness_cols[2].metric("CLI Status", CLI_STATUS_LABELS.get(mode_state.kraken_cli_status, mode_state.kraken_cli_status))
-    readiness_cols[3].metric("Execution Safety", "PAPER ONLY")
+    readiness_cols[2].metric("Execution Provider", mode_state.execution_provider)
+    readiness_cols[3].metric("Live Status", mode_state.live_readiness_status.replace("_", " "))
 
     trust_left, trust_right = st.columns(2)
     with trust_left:
@@ -519,10 +578,16 @@ def main() -> None:
                     if row.get("market_data_provider")
                     else "N/A"
                 ),
+                "execution": (
+                    f"{row.get('execution_provider') or 'N/A'} / "
+                    f"{EXECUTION_STATUS_LABELS.get(row.get('execution_status'), row.get('execution_status') or 'N/A')}"
+                ),
                 "signals": row["signal_count"],
+                "orders": row.get("order_count", 0),
                 "executed": row["executed_count"],
                 "blocked": row["blocked_count"],
                 "artifacts": row["artifact_count"],
+                "receipts": row.get("receipt_count", 0),
             }
             for row in run_history_rows
         ]
@@ -542,12 +607,14 @@ def main() -> None:
             blocked_trade_rows=blocked,
             trade_rows=trades,
             artifact_rows=artifacts,
+            order_rows=orders,
             decision_chain_limit=5,
         )
         decision_chains = selected_run_scope["decision_chains"]
         signal_rows = format_signal_rows(selected_run_scope["signals"])
         blocked_rows = format_blocked_trade_rows(selected_run_scope["blocked_trades"])
         trade_rows = format_trade_rows(selected_run_scope["trades"])
+        order_rows = format_order_rows(selected_run_scope["orders"])
         artifact_rows = format_artifact_rows(selected_run_scope["artifacts"])
         latest_artifact = selected_run_scope["latest_artifact"]
         run_detail = format_run_detail(selected_run)
@@ -566,6 +633,14 @@ def main() -> None:
                         "market_data_status": selected_run.get("market_data_status"),
                         "requested_kraken_backend": _backend_label(selected_run.get("requested_kraken_backend")),
                         "effective_kraken_backend": _backend_label(selected_run.get("effective_kraken_backend")),
+                        "execution_provider": selected_run.get("execution_provider"),
+                        "execution_status": EXECUTION_STATUS_LABELS.get(
+                            selected_run.get("execution_status"),
+                            selected_run.get("execution_status"),
+                        ),
+                        "requested_kraken_execution_mode": selected_run.get("requested_kraken_execution_mode") or "N/A",
+                        "effective_kraken_execution_mode": selected_run.get("effective_kraken_execution_mode") or "N/A",
+                        "live_readiness_status": selected_run.get("live_readiness_status"),
                         "kraken_cli_status": CLI_STATUS_LABELS.get(
                             selected_run.get("kraken_cli_status"),
                             selected_run.get("kraken_cli_status"),
@@ -573,7 +648,9 @@ def main() -> None:
                         "signal_count": run_detail["signal_count"],
                         "executed_count": run_detail["executed_count"],
                         "blocked_count": run_detail["blocked_count"],
+                        "order_count": run_detail["order_count"],
                         "artifact_count": run_detail["artifact_count"],
+                        "receipt_count": run_detail["receipt_count"],
                     }
                 )
             with detail_right:
@@ -592,8 +669,8 @@ def main() -> None:
             proof_cols[0].metric("Signals", proof_summary["signal_count"])
             proof_cols[1].metric("Executed", proof_summary["executed_count"])
             proof_cols[2].metric("Blocked", proof_summary["blocked_count"])
-            proof_cols[3].metric("Artifacts", proof_summary["artifact_count"])
-            proof_cols[4].metric("Observed Prices", len(proof_summary["observed_prices"]))
+            proof_cols[3].metric("Orders", proof_summary["order_count"])
+            proof_cols[4].metric("Artifacts / Receipts", f"{proof_summary['artifact_count']} / {proof_summary['receipt_count']}")
             st.write(proof_summary["why_it_matters"])
             st.json(
                 {
@@ -605,6 +682,14 @@ def main() -> None:
                         proof_summary.get("kraken_cli_status"),
                         proof_summary.get("kraken_cli_status"),
                     ),
+                    "execution_provider": proof_summary["execution_provider"],
+                    "execution_status": EXECUTION_STATUS_LABELS.get(
+                        proof_summary.get("execution_status"),
+                        proof_summary.get("execution_status"),
+                    ),
+                    "requested_kraken_execution_mode": proof_summary.get("requested_kraken_execution_mode") or "N/A",
+                    "effective_kraken_execution_mode": proof_summary.get("effective_kraken_execution_mode") or "N/A",
+                    "live_readiness_status": proof_summary.get("live_readiness_status"),
                     "modes": proof_summary["modes"],
                     "agent": agent_identity_summary,
                 }
@@ -619,7 +704,7 @@ def main() -> None:
     if decision_chains:
         latest_chain = decision_chains[0]
         latest_summary = format_decision_chain_summary(latest_chain)
-        signal_col, risk_col, artifact_col, execution_col = st.columns(4)
+        signal_col, risk_col, artifact_col, order_col, execution_col = st.columns(5)
         with signal_col:
             st.subheader("Signal")
             st.write(f"Symbol: `{latest_summary['symbol']}`")
@@ -651,8 +736,15 @@ def main() -> None:
                 "CLI status: "
                 f"`{CLI_STATUS_LABELS.get(latest_summary['artifact_kraken_cli_status'], latest_summary['artifact_kraken_cli_status'] or 'N/A')}`"
             )
+        with order_col:
+            st.subheader("Order / Receipt")
+            st.write(f"Order id: `{latest_summary['order_id'] or 'N/A'}`")
+            st.write(f"Order status: `{latest_summary['order_status'] or 'N/A'}`")
+            st.write(f"Order provider: `{latest_summary['order_provider'] or 'N/A'}`")
+            st.write(f"Receipt id: `{latest_summary['receipt_id'] or 'N/A'}`")
+            st.write(f"Receipt status: `{latest_summary['receipt_status'] or 'N/A'}`")
         with execution_col:
-            st.subheader("Execution Outcome")
+            st.subheader("Trade Outcome")
             st.write(f"Status: `{latest_summary['trade_status']}`")
             st.write(f"Quantity: `{latest_summary['quantity']}`")
             st.write(f"Price: `{latest_summary['price_executed']}`")
@@ -706,13 +798,22 @@ def main() -> None:
     left, right = st.columns(2)
     with left:
         _show_table(
+            "Recent Orders",
+            order_rows,
+            "No orders recorded for the selected run.",
+        )
+    with right:
+        _show_table(
             "Recent Blocked Trades",
             blocked_rows,
             "No blocked trades found for the selected run.",
         )
-    with right:
+
+    st.markdown("### Latest Artifact")
+    st.caption("TradeIntent captures the pre-execution plan. ExecutionReceipt captures the post-execution order lifecycle when execution proceeds.")
+    left, right = st.columns(2)
+    with left:
         st.subheader("Latest Artifact")
-        st.caption("TradeIntent-style artifact saved locally before execution for auditability.")
         preview = format_latest_artifact_summary(latest_artifact)
         if preview:
             st.write(preview["summary"])
@@ -741,6 +842,13 @@ def main() -> None:
             )
         else:
             st.info("No artifacts found for the selected run.")
+    with right:
+        st.subheader("Execution Snapshot")
+        preview = format_latest_artifact_summary(latest_artifact)
+        if preview and preview.get("execution"):
+            st.json(preview["execution"])
+        else:
+            st.info("No execution receipt snapshot is available for the latest artifact.")
 
     st.markdown("### Artifact History")
     if artifact_rows:

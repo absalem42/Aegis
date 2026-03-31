@@ -8,7 +8,7 @@ from typing import Any
 from uuid import uuid4
 
 from config import Settings
-from models import ExecutionResult, Signal, utc_now_iso
+from models import ExecutionOutcome, Signal, utc_now_iso
 
 
 def get_connection(db_path: str | Path) -> sqlite3.Connection:
@@ -93,8 +93,27 @@ def init_db(connection: sqlite3.Connection) -> None:
             status TEXT NOT NULL,
             summary_json TEXT NOT NULL
         );
+
+        CREATE TABLE IF NOT EXISTS orders (
+            id TEXT PRIMARY KEY,
+            ts TEXT NOT NULL,
+            run_id TEXT NOT NULL,
+            symbol TEXT NOT NULL,
+            side TEXT NOT NULL,
+            quantity REAL NOT NULL,
+            order_type TEXT NOT NULL,
+            artifact_id TEXT NOT NULL,
+            execution_provider TEXT NOT NULL,
+            execution_mode TEXT NOT NULL,
+            status TEXT NOT NULL,
+            external_order_id TEXT,
+            response_json TEXT NOT NULL,
+            notes TEXT NOT NULL
+        );
         """
     )
+    _ensure_column(connection, "trades", "order_id", "TEXT")
+    _ensure_column(connection, "trades", "execution_provider", "TEXT NOT NULL DEFAULT 'Internal Paper Engine'")
     connection.commit()
 
 
@@ -171,6 +190,48 @@ def insert_blocked_trade(
     connection.commit()
 
 
+def insert_order(
+    connection: sqlite3.Connection,
+    outcome: ExecutionOutcome,
+    notes: str = "",
+) -> None:
+    response_json = json.dumps(outcome.provider_metadata, sort_keys=True)
+    connection.execute(
+        """
+        INSERT INTO orders (
+            id, ts, run_id, symbol, side, quantity, order_type, artifact_id, execution_provider,
+            execution_mode, status, external_order_id, response_json, notes
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            outcome.local_order_id,
+            outcome.ts,
+            outcome.run_id,
+            outcome.symbol,
+            outcome.side,
+            outcome.quantity,
+            outcome.order_type,
+            outcome.artifact_id,
+            outcome.execution_provider,
+            _execution_mode_label(outcome),
+            outcome.status,
+            outcome.external_order_id,
+            response_json,
+            notes or outcome.notes,
+        ),
+    )
+    connection.commit()
+
+
+def get_order_by_artifact_id(connection: sqlite3.Connection, artifact_id: str) -> dict[str, Any] | None:
+    row = connection.execute(
+        "SELECT * FROM orders WHERE artifact_id = ? ORDER BY ts DESC LIMIT 1",
+        (artifact_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
 def get_position(connection: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
     return connection.execute("SELECT * FROM positions WHERE symbol = ?", (symbol,)).fetchone()
 
@@ -229,37 +290,152 @@ def refresh_position_prices(connection: sqlite3.Connection, latest_prices: dict[
         )
 
 
-def record_trade(connection: sqlite3.Connection, result: ExecutionResult, reason: str = "EXECUTED") -> None:
+def apply_execution_outcome(
+    connection: sqlite3.Connection,
+    outcome: ExecutionOutcome,
+    reason: str,
+) -> dict[str, Any]:
+    insert_order(connection, outcome, notes=outcome.notes)
+
+    if outcome.status != "FILLED" or outcome.filled_quantity <= 0:
+        return {
+            "order_id": outcome.local_order_id,
+            "trade_id": None,
+            "status": outcome.status,
+            "pnl": None,
+            "filled_quantity": outcome.filled_quantity,
+            "fill_price": outcome.fill_price,
+        }
+
+    now = outcome.ts or utc_now_iso()
+    symbol = outcome.symbol
+    side = outcome.side.upper()
+    filled_quantity = round(outcome.filled_quantity, 6)
+    fill_price = round(outcome.fill_price, 6)
+    position = get_position(connection, symbol)
+    existing_qty = float(position["quantity"]) if position else 0.0
+    average_cost = float(position["average_cost"]) if position else 0.0
+    pnl = 0.0
+
+    if side == "BUY":
+        new_quantity = round(existing_qty + filled_quantity, 6)
+        new_average_cost = (
+            ((existing_qty * average_cost) + (filled_quantity * fill_price)) / new_quantity
+            if new_quantity > 0
+            else fill_price
+        )
+        upsert_position(
+            connection,
+            symbol=symbol,
+            quantity=new_quantity,
+            average_cost=new_average_cost,
+            last_price=fill_price,
+            updated_at=now,
+        )
+    elif side == "SELL":
+        executed_quantity = min(filled_quantity, existing_qty)
+        filled_quantity = round(executed_quantity, 6)
+        pnl = round((fill_price - average_cost) * filled_quantity, 6)
+        remaining_quantity = round(existing_qty - filled_quantity, 6)
+        if remaining_quantity <= 0:
+            delete_position(connection, symbol)
+        else:
+            upsert_position(
+                connection,
+                symbol=symbol,
+                quantity=remaining_quantity,
+                average_cost=average_cost,
+                last_price=fill_price,
+                updated_at=now,
+            )
+    else:
+        raise ValueError(f"Unsupported execution side: {side}")
+
+    trade_id = outcome.trade_id or str(uuid4())
+    record_trade(
+        connection,
+        trade_id=trade_id,
+        ts=now,
+        symbol=symbol,
+        side=side,
+        quantity=filled_quantity,
+        price=fill_price,
+        notional=round(filled_quantity * fill_price, 6),
+        reason=reason,
+        status=outcome.status,
+        pnl=pnl,
+        artifact_id=outcome.artifact_id,
+        order_id=outcome.local_order_id,
+        execution_provider=outcome.execution_provider,
+    )
+    return {
+        "order_id": outcome.local_order_id,
+        "trade_id": trade_id,
+        "status": outcome.status,
+        "pnl": pnl,
+        "filled_quantity": filled_quantity,
+        "fill_price": fill_price,
+    }
+
+
+def record_trade(
+    connection: sqlite3.Connection,
+    trade_id: str,
+    ts: str,
+    symbol: str,
+    side: str,
+    quantity: float,
+    price: float,
+    notional: float,
+    reason: str,
+    status: str,
+    pnl: float,
+    artifact_id: str,
+    order_id: str | None,
+    execution_provider: str,
+) -> None:
     connection.execute(
         """
-        INSERT INTO trades (id, ts, symbol, side, quantity, price, notional, reason, status, pnl, artifact_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO trades (
+            id, ts, symbol, side, quantity, price, notional, reason, status, pnl,
+            artifact_id, order_id, execution_provider
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
-            result.trade_id,
-            result.ts,
-            result.symbol,
-            result.side,
-            result.quantity,
-            result.price,
-            result.notional,
+            trade_id,
+            ts,
+            symbol,
+            side,
+            quantity,
+            price,
+            notional,
             reason,
-            "FILLED",
-            result.pnl,
-            result.artifact_id,
+            status,
+            pnl,
+            artifact_id,
+            order_id,
+            execution_provider,
         ),
     )
     connection.commit()
 
 
 def list_recent(
-    connection: sqlite3.Connection, table: str, limit: int = 10, order_by: str = "ts"
+    connection: sqlite3.Connection,
+    table: str,
+    limit: int = 10,
+    order_by: str = "ts",
 ) -> list[dict[str, Any]]:
     rows = connection.execute(
         f"SELECT * FROM {table} ORDER BY {order_by} DESC LIMIT ?",
         (limit,),
     ).fetchall()
     return [dict(row) for row in rows]
+
+
+def list_recent_orders(connection: sqlite3.Connection, limit: int = 10) -> list[dict[str, Any]]:
+    return list_recent(connection, "orders", limit=limit)
 
 
 def get_recent_trade_pnls(connection: sqlite3.Connection, limit: int = 5) -> list[float]:
@@ -402,6 +578,7 @@ def get_status_summary(connection: sqlite3.Connection, settings: Settings) -> di
         "artifact_directory": str(settings.artifact_dir),
         "mode": "paper",
         "trade_count": count_rows(connection, "trades"),
+        "order_count": count_rows(connection, "orders"),
         "blocked_trade_count": count_rows(connection, "blocked_trades"),
         "open_position_count": count_open_positions(connection),
     }
@@ -434,6 +611,19 @@ def reset_runtime_state(settings: Settings) -> dict[str, Any]:
         "db_path": str(settings.db_path),
         "artifact_dir": str(settings.artifact_dir),
     }
+
+
+def _execution_mode_label(outcome: ExecutionOutcome) -> str:
+    if outcome.effective_kraken_execution_mode:
+        return outcome.effective_kraken_execution_mode
+    return outcome.effective_execution_mode
+
+
+def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl: str) -> None:
+    rows = connection.execute(f"PRAGMA table_info({table})").fetchall()
+    existing = {str(row["name"]) for row in rows}
+    if column not in existing:
+        connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _count_table(connection: sqlite3.Connection, table: str) -> int:

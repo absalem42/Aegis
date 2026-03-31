@@ -45,19 +45,58 @@ class RiskDecision:
 
 
 @dataclass(slots=True)
-class ExecutionResult:
-    trade_id: str
+class ExecutionRequest:
+    run_id: str
     symbol: str
     side: str
     quantity: float
     price: float
-    notional: float
-    pnl: float
+    order_type: str
     artifact_id: str
+    requested_execution_mode: str
+    requested_kraken_execution_mode: str | None
+    requested_execution_provider: str
+    mode_summary: dict[str, Any]
+    signal_reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(slots=True)
+class ExecutionOutcome:
+    run_id: str
+    local_order_id: str
+    symbol: str
+    side: str
+    quantity: float
+    filled_quantity: float
+    price: float
+    fill_price: float
+    notional: float
+    artifact_id: str
+    order_type: str
+    status: str
+    execution_provider: str
+    execution_source_type: str
+    requested_execution_mode: str
+    effective_execution_mode: str
+    requested_kraken_execution_mode: str | None
+    effective_kraken_execution_mode: str | None
+    provider_metadata: dict[str, Any]
+    trade_id: str | None = None
+    pnl: float | None = None
+    external_order_id: str | None = None
+    external_status: str | None = None
+    notes: str = ""
     ts: str = field(default_factory=utc_now_iso)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# Compatibility alias for older code paths and tests.
+ExecutionResult = ExecutionOutcome
 
 
 @dataclass(slots=True)
@@ -68,6 +107,9 @@ class EngineCycleResult:
     blocked_count: int
     latest_prices: dict[str, float]
     summary: dict[str, Any]
+    order_count: int = 0
+    artifact_count: int = 0
+    receipt_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

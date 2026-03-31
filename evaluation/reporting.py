@@ -11,6 +11,7 @@ from config import (
     EXECUTION_MODE_PAPER,
     KRAKEN_BACKEND_CLI,
     KRAKEN_BACKEND_REST,
+    KRAKEN_EXECUTION_MODE_PAPER,
     MARKET_DATA_MODE_KRAKEN,
     MARKET_DATA_MODE_MOCK,
     Settings,
@@ -37,7 +38,11 @@ def run_evaluation(
     reset_first: bool = True,
     label: str | None = None,
 ) -> dict[str, Any]:
-    evaluation_settings = replace(settings, execution_mode=EXECUTION_MODE_PAPER)
+    evaluation_settings = replace(
+        settings,
+        execution_mode=EXECUTION_MODE_PAPER,
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
+    )
     evaluation_settings.ensure_paths()
     cycles = max(1, int(cycles))
     report_id = str(uuid4())
@@ -383,12 +388,12 @@ def build_provider_capabilities_summary() -> list[dict[str, str]]:
         {
             "provider": "Kraken CLI",
             "status": "Optional",
-            "notes": "Requires local Kraken CLI binary. Read-only market-data path in this milestone.",
+            "notes": "Requires local Kraken CLI binary. Supports read-only market data and optional CLI paper execution.",
         },
         {
             "provider": "Execution",
             "status": "Paper Only",
-            "notes": "All evaluations and demo runs still execute locally with paper trades.",
+            "notes": "Evaluations stay internal-paper-only. Demo runs may use internal paper or Kraken CLI paper. Kraken live remains blocked.",
         },
     ]
 

@@ -13,7 +13,7 @@ Aegis v0 is SQLite-first.
 
 ### `trades`
 
-Purpose: store executed paper trades.
+Purpose: store executed fills only.
 
 Minimum recommended columns:
 
@@ -26,6 +26,9 @@ Minimum recommended columns:
 - `notional`
 - `reason`
 - `status`
+- `artifact_id`
+- `order_id`
+- `execution_provider`
 
 ### `blocked_trades`
 
@@ -86,19 +89,41 @@ Minimum recommended columns:
 
 ## Optional or Future-Facing Tables
 
-These are not required for the first pass, but may become useful later:
+These are useful when the audit trail needs to distinguish order lifecycle from fills:
 
 - `signals`
 - `agent_runs`
 - `orders`
 - `portfolio_snapshots`
 
-If added later, they should remain clearly justified and not complicate the minimum v0 schema.
+### `orders`
+
+Purpose: store local order-lifecycle records separately from fills.
+
+Suggested columns:
+
+- `id`
+- `ts`
+- `run_id`
+- `symbol`
+- `side`
+- `quantity`
+- `order_type`
+- `artifact_id`
+- `execution_provider`
+- `execution_mode`
+- `status`
+- `external_order_id`
+- `response_json`
+- `notes`
+
+If added, the table should stay lightweight and make the audit trail clearer rather than introducing a full broker backend abstraction.
 
 ## Core Invariants
 
 - Paper trading only.
 - Positions reflect executed trades only.
+- Orders represent intent and provider response metadata; fills still live in `trades`.
 - Blocked trades do not mutate positions.
 - Artifacts are append-friendly local audit material.
 - Daily metrics should be derivable from recorded local trading activity.

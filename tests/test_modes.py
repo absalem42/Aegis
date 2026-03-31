@@ -5,11 +5,15 @@ from config import (
     EXECUTION_MODE_PAPER,
     KRAKEN_BACKEND_CLI,
     KRAKEN_BACKEND_REST,
+    KRAKEN_EXECUTION_MODE_LIVE,
+    KRAKEN_EXECUTION_MODE_PAPER,
     MARKET_DATA_MODE_KRAKEN,
     MARKET_DATA_MODE_MOCK,
     Settings,
 )
 from engine import (
+    EXECUTION_STATUS_BLOCKED,
+    EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER,
     KRAKEN_CLI_STATUS_ACTIVE,
     KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK,
     KRAKEN_CLI_STATUS_FALLBACK_TO_REST,
@@ -23,6 +27,7 @@ from engine import (
     run_engine_cycle,
 )
 from execution.paper_executor import PaperExecutor
+from execution.kraken_cli_executor import KrakenCliExecutionError, KrakenCliPaperExecutor
 from market.kraken_cli import KrakenCliError
 from market.kraken_client import KrakenMarketDataError
 from market.mock_data import MockMarketDataProvider
@@ -92,6 +97,22 @@ class FailingKrakenCliProvider:
 
     def ensure_available(self) -> None:
         raise KrakenCliError("simulated Kraken CLI outage")
+
+
+class ActiveKrakenCliPaperExecutor(KrakenCliPaperExecutor):
+    def __init__(self):
+        return None
+
+    def ensure_paper_ready(self, starting_cash: float) -> None:
+        return None
+
+
+class FailingKrakenCliPaperExecutor(KrakenCliPaperExecutor):
+    def __init__(self):
+        return None
+
+    def ensure_paper_ready(self, starting_cash: float) -> None:
+        raise KrakenCliExecutionError("simulated Kraken CLI paper outage")
 
 
 def test_runtime_resolution_defaults_to_safe_local_modes(tmp_path):
@@ -253,3 +274,61 @@ def test_runtime_resolution_gracefully_falls_back_from_kraken_execution_request(
     assert mode_state.effective_execution_mode == EXECUTION_MODE_PAPER
     assert mode_state.market_data_status == MARKET_DATA_STATUS_FALLBACK_TO_MOCK
     assert len(mode_state.warnings) == 2
+
+
+def test_runtime_resolution_uses_kraken_cli_paper_execution_when_available(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine._build_kraken_cli_paper_executor", lambda settings: ActiveKrakenCliPaperExecutor())
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode=EXECUTION_MODE_KRAKEN,
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
+    )
+
+    provider, executor, mode_state = resolve_runtime_components(settings)
+
+    assert isinstance(provider, MockMarketDataProvider)
+    assert isinstance(executor, ActiveKrakenCliPaperExecutor)
+    assert mode_state.effective_execution_mode == EXECUTION_MODE_KRAKEN
+    assert mode_state.effective_kraken_execution_mode == KRAKEN_EXECUTION_MODE_PAPER
+    assert mode_state.execution_provider == "Kraken CLI Paper Suite"
+    assert mode_state.execution_status == "ACTIVE"
+
+
+def test_runtime_resolution_falls_back_to_internal_paper_when_cli_paper_is_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    monkeypatch.setattr("engine._build_kraken_cli_paper_executor", lambda settings: FailingKrakenCliPaperExecutor())
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode=EXECUTION_MODE_KRAKEN,
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
+    )
+
+    provider, executor, mode_state = resolve_runtime_components(settings)
+
+    assert isinstance(provider, MockMarketDataProvider)
+    assert isinstance(executor, PaperExecutor)
+    assert mode_state.effective_execution_mode == EXECUTION_MODE_PAPER
+    assert mode_state.effective_kraken_execution_mode is None
+    assert mode_state.execution_status == EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER
+    assert mode_state.warnings
+
+
+def test_runtime_resolution_blocks_kraken_live_without_silent_fallback(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode=EXECUTION_MODE_KRAKEN,
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+    )
+
+    provider, executor, mode_state = resolve_runtime_components(settings)
+
+    assert isinstance(provider, MockMarketDataProvider)
+    assert mode_state.effective_execution_mode == "blocked"
+    assert mode_state.effective_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
+    assert mode_state.execution_status == EXECUTION_STATUS_BLOCKED
+    assert mode_state.live_readiness_status == "BLOCKED_DISABLED"

@@ -2,69 +2,38 @@ from __future__ import annotations
 
 from uuid import uuid4
 
-from db import delete_position, get_position, record_trade, upsert_position
-from models import ExecutionResult, Signal, utc_now_iso
+from models import ExecutionOutcome, ExecutionRequest
 
 
 class PaperExecutor:
-    def execute(
-        self,
-        connection,
-        signal: Signal,
-        quantity: float,
-        price: float,
-        artifact_id: str,
-    ) -> ExecutionResult:
-        now = utc_now_iso()
-        position = get_position(connection, signal.symbol)
-        existing_qty = float(position["quantity"]) if position else 0.0
-        average_cost = float(position["average_cost"]) if position else 0.0
-        pnl = 0.0
+    provider_name = "Internal Paper Engine"
+    source_type = "internal-sim"
+    backend_name = "internal"
 
-        if signal.action == "BUY":
-            new_quantity = existing_qty + quantity
-            new_average_cost = (
-                ((existing_qty * average_cost) + (quantity * price)) / new_quantity
-                if new_quantity > 0
-                else price
-            )
-            upsert_position(
-                connection,
-                symbol=signal.symbol,
-                quantity=new_quantity,
-                average_cost=new_average_cost,
-                last_price=price,
-                updated_at=now,
-            )
-        elif signal.action == "SELL":
-            sell_quantity = min(quantity, existing_qty)
-            pnl = round((price - average_cost) * sell_quantity, 6)
-            remaining_quantity = round(existing_qty - sell_quantity, 6)
-            if remaining_quantity <= 0:
-                delete_position(connection, signal.symbol)
-            else:
-                upsert_position(
-                    connection,
-                    symbol=signal.symbol,
-                    quantity=remaining_quantity,
-                    average_cost=average_cost,
-                    last_price=price,
-                    updated_at=now,
-                )
-            quantity = sell_quantity
-        else:
-            raise ValueError(f"Unsupported paper execution action: {signal.action}")
+    def availability_note(self) -> str:
+        return "Internal paper execution is the safe default path."
 
-        result = ExecutionResult(
-            trade_id=str(uuid4()),
-            symbol=signal.symbol,
-            side=signal.action,
-            quantity=round(quantity, 6),
-            price=round(price, 6),
-            notional=round(quantity * price, 6),
-            pnl=pnl,
-            artifact_id=artifact_id,
-            ts=now,
+    def execute(self, connection, request: ExecutionRequest) -> ExecutionOutcome:
+        filled_quantity = round(request.quantity, 6)
+        fill_price = round(request.price, 6)
+        return ExecutionOutcome(
+            run_id=request.run_id,
+            local_order_id=str(uuid4()),
+            symbol=request.symbol,
+            side=request.side.upper(),
+            quantity=filled_quantity,
+            filled_quantity=filled_quantity,
+            price=fill_price,
+            fill_price=fill_price,
+            notional=round(filled_quantity * fill_price, 6),
+            artifact_id=request.artifact_id,
+            order_type=request.order_type,
+            status="FILLED",
+            execution_provider=self.provider_name,
+            execution_source_type=self.source_type,
+            requested_execution_mode=request.requested_execution_mode,
+            effective_execution_mode=request.mode_summary.get("effective_execution_mode", request.requested_execution_mode),
+            requested_kraken_execution_mode=request.requested_kraken_execution_mode,
+            effective_kraken_execution_mode=request.mode_summary.get("effective_kraken_execution_mode"),
+            provider_metadata={"simulated": True},
         )
-        record_trade(connection, result, reason=signal.reason)
-        return result

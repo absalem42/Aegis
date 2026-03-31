@@ -25,6 +25,28 @@ def _parse_ts(value: str | None) -> datetime:
         return datetime.min
 
 
+def _safe_get(payload: dict[str, Any], *path: str) -> Any:
+    current: Any = payload
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _safe_notional(quantity: Any, price: Any) -> float | None:
+    try:
+        return round(float(quantity) * float(price), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def _readiness_badge(readiness: dict[str, Any]) -> str:
+    passed = readiness.get("ready_checks_passed", 0)
+    total = readiness.get("ready_checks_total", 0)
+    return f"{passed}/{total} checks" if total else "N/A"
+
+
 def format_signal_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     formatted: list[dict[str, Any]] = []
     for row in rows:
@@ -61,6 +83,10 @@ def format_blocked_trade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]
                 "block_reason": row.get("block_reason"),
                 "risk_reason_codes": ", ".join(reason_codes) if isinstance(reason_codes, list) else "",
                 "signal_reason": context.get("signal_reason"),
+                "execution_provider": context.get("execution_provider"),
+                "execution_status": context.get("execution_status"),
+                "artifact_id": context.get("artifact_id"),
+                "live_readiness_status": _safe_get(context, "live_readiness", "status"),
             }
         )
     return formatted
@@ -76,28 +102,58 @@ def format_trade_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "price": row.get("price"),
             "notional": row.get("notional"),
             "reason": row.get("reason"),
+            "status": row.get("status"),
             "pnl": row.get("pnl"),
             "artifact_id": row.get("artifact_id"),
+            "order_id": row.get("order_id"),
+            "execution_provider": row.get("execution_provider"),
         }
         for row in rows
     ]
+
+
+def format_order_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    formatted: list[dict[str, Any]] = []
+    for row in rows:
+        response = _loads_json(row.get("response_json"))
+        formatted.append(
+            {
+                "ts": row.get("ts"),
+                "order_id": row.get("id"),
+                "run_id": row.get("run_id"),
+                "symbol": row.get("symbol"),
+                "side": row.get("side"),
+                "quantity": row.get("quantity"),
+                "order_type": row.get("order_type"),
+                "artifact_id": row.get("artifact_id"),
+                "execution_provider": row.get("execution_provider"),
+                "execution_mode": row.get("execution_mode"),
+                "status": row.get("status"),
+                "external_order_id": row.get("external_order_id"),
+                "notes": row.get("notes"),
+                "provider_summary": response,
+            }
+        )
+    return formatted
 
 
 def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     formatted: list[dict[str, Any]] = []
     for row in rows:
         payload = _loads_json(row.get("payload_json"))
-        risk = payload.get("risk", {})
         readiness = payload.get("validation_readiness", {})
         market_data = payload.get("market_data", {})
+        execution = payload.get("execution", {})
+        risk = payload.get("risk", {})
         formatted.append(
             {
                 "ts": row.get("ts"),
+                "artifact_id": row.get("id"),
                 "subject": row.get("subject"),
                 "type": row.get("artifact_type"),
                 "side": payload.get("side"),
-                "quantity": payload.get("quantity"),
-                "price": payload.get("price"),
+                "quantity": payload.get("quantity") or execution.get("filled_quantity"),
+                "price": payload.get("price") or execution.get("fill_price"),
                 "signal_reason": payload.get("reason"),
                 "risk_allowed": risk.get("allowed"),
                 "agent_name": payload.get("agent", {}).get("agent_name"),
@@ -105,6 +161,11 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "kraken_backend": market_data.get("backend"),
                 "market_data_status": market_data.get("status"),
                 "kraken_cli_status": market_data.get("kraken_cli_status"),
+                "execution_provider": execution.get("execution_provider"),
+                "execution_mode": execution.get("effective_execution_mode"),
+                "execution_status": execution.get("status"),
+                "local_order_id": execution.get("local_order_id"),
+                "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
                 "readiness": _readiness_badge(readiness),
                 "path": row.get("path"),
                 "hash": str(row.get("hash_or_digest", ""))[:12],
@@ -117,18 +178,25 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
     if not row:
         return None
     payload = _loads_json(row.get("payload_json"))
-    risk = payload.get("risk", {})
     readiness = payload.get("validation_readiness", {})
     market_data = payload.get("market_data", {})
+    execution = payload.get("execution", {})
+    risk = payload.get("risk", {})
+    artifact_type = row.get("artifact_type")
+    summary = (
+        "Post-execution receipt linking the trade intent to the local order lifecycle."
+        if artifact_type == "ExecutionReceipt"
+        else "Pre-execution local TradeIntent artifact saved before a paper trade decision."
+    )
     return {
         "artifact_id": row.get("id"),
-        "type": row.get("artifact_type"),
+        "type": artifact_type,
         "subject": row.get("subject"),
         "created_at": row.get("ts"),
         "symbol": payload.get("symbol", row.get("subject")),
         "side": payload.get("side"),
-        "quantity": payload.get("quantity"),
-        "price": payload.get("price"),
+        "quantity": payload.get("quantity") or execution.get("filled_quantity"),
+        "price": payload.get("price") or execution.get("fill_price"),
         "signal_reason": payload.get("reason"),
         "risk_allowed": risk.get("allowed"),
         "risk_reason_codes": ", ".join(risk.get("reason_codes", [])),
@@ -140,7 +208,9 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "kraken_cli_status": market_data.get("kraken_cli_status"),
         "agent": payload.get("agent", {}),
         "validation_readiness": readiness,
-        "summary": "Pre-execution local TradeIntent artifact saved before a paper trade decision.",
+        "execution": execution,
+        "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
+        "summary": summary,
     }
 
 
@@ -148,6 +218,7 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     formatted: list[dict[str, Any]] = []
     for row in rows:
         summary = _loads_json(row.get("summary_json"))
+        modes = summary.get("modes", {})
         formatted.append(
             {
                 "run_id": row.get("id"),
@@ -157,15 +228,23 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "signal_count": summary.get("signal_count", 0),
                 "executed_count": summary.get("executed_count", 0),
                 "blocked_count": summary.get("blocked_count", 0),
+                "order_count": summary.get("order_count", 0),
                 "artifact_count": summary.get("artifact_count", 0),
+                "receipt_count": summary.get("receipt_count", 0),
                 "latest_prices": summary.get("latest_prices", {}),
                 "metrics": summary.get("metrics", {}),
-                "modes": summary.get("modes", {}),
-                "market_data_provider": summary.get("modes", {}).get("market_data_provider"),
-                "market_data_status": summary.get("modes", {}).get("market_data_status"),
-                "requested_kraken_backend": summary.get("modes", {}).get("requested_kraken_backend"),
-                "effective_kraken_backend": summary.get("modes", {}).get("effective_kraken_backend"),
-                "kraken_cli_status": summary.get("modes", {}).get("kraken_cli_status"),
+                "modes": modes,
+                "market_data_provider": modes.get("market_data_provider"),
+                "market_data_status": modes.get("market_data_status"),
+                "requested_kraken_backend": modes.get("requested_kraken_backend"),
+                "effective_kraken_backend": modes.get("effective_kraken_backend"),
+                "kraken_cli_status": modes.get("kraken_cli_status"),
+                "execution_provider": modes.get("execution_provider"),
+                "execution_status": modes.get("execution_status"),
+                "requested_kraken_execution_mode": modes.get("requested_kraken_execution_mode"),
+                "effective_kraken_execution_mode": modes.get("effective_kraken_execution_mode"),
+                "execution_source_type": modes.get("execution_source_type"),
+                "live_readiness_status": modes.get("live_readiness_status"),
             }
         )
     return formatted
@@ -175,7 +254,7 @@ def format_run_option_labels(rows: list[dict[str, Any]]) -> list[str]:
     return [
         (
             f"{row['run_id_short']} | {row['ts']} | "
-            f"exec {row['executed_count']} | blocked {row['blocked_count']}"
+            f"exec {row['executed_count']} | blocked {row['blocked_count']} | orders {row.get('order_count', 0)}"
         )
         for row in rows
     ]
@@ -184,186 +263,49 @@ def format_run_option_labels(rows: list[dict[str, Any]]) -> list[str]:
 def format_run_detail(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not row:
         return None
-    metrics = row.get("metrics", {})
     return {
         "run_id": row.get("run_id"),
         "timestamp": row.get("ts"),
         "status": row.get("status"),
         "prices_observed": row.get("latest_prices", {}),
-        "metrics_snapshot": metrics,
+        "metrics_snapshot": row.get("metrics", {}),
         "modes": row.get("modes", {}),
         "signal_count": row.get("signal_count", 0),
         "executed_count": row.get("executed_count", 0),
         "blocked_count": row.get("blocked_count", 0),
+        "order_count": row.get("order_count", 0),
         "artifact_count": row.get("artifact_count", 0),
-    }
-
-
-def build_decision_chains(
-    signal_rows: list[dict[str, Any]],
-    blocked_trade_rows: list[dict[str, Any]],
-    trade_rows: list[dict[str, Any]],
-    artifact_rows: list[dict[str, Any]],
-    limit: int = 5,
-) -> list[dict[str, Any]]:
-    signals = list(signal_rows)
-    artifacts_by_id = {row.get("id"): row for row in artifact_rows if row.get("id")}
-    chains: list[dict[str, Any]] = []
-
-    for row in trade_rows:
-        trade_ts = row.get("ts")
-        matched_signal = _match_signal(
-            signals=signals,
-            symbol=row.get("symbol"),
-            reason=row.get("reason"),
-            ts=trade_ts,
-        )
-        artifact = artifacts_by_id.get(row.get("artifact_id"))
-        artifact_payload = _loads_json(artifact.get("payload_json")) if artifact else {}
-        risk = artifact_payload.get("risk", {})
-        chains.append(
-            {
-                "ts": trade_ts,
-                "symbol": row.get("symbol"),
-                "action": row.get("side"),
-                "outcome": "EXECUTED",
-                "signal_reason": row.get("reason"),
-                "signal": _signal_summary(matched_signal),
-                "risk": {
-                    "allowed": True,
-                    "summary": "ALLOWED",
-                    "reason_codes": risk.get("reason_codes", []),
-                },
-                "artifact": _artifact_summary(artifact),
-                "execution": {
-                    "status": row.get("status", "FILLED"),
-                    "quantity": row.get("quantity"),
-                    "price": row.get("price"),
-                    "notional": row.get("notional"),
-                    "pnl": row.get("pnl"),
-                    "artifact_id": row.get("artifact_id"),
-                },
-            }
-        )
-
-    for row in blocked_trade_rows:
-        context = _loads_json(row.get("context_json"))
-        matched_signal = _match_signal(
-            signals=signals,
-            symbol=row.get("symbol"),
-            reason=context.get("signal_reason"),
-            ts=row.get("ts"),
-        )
-        signal_summary = _signal_summary(matched_signal)
-        if not signal_summary["indicators"] and isinstance(context.get("indicators"), dict):
-            signal_summary["indicators"] = context["indicators"]
-        chains.append(
-            {
-                "ts": row.get("ts"),
-                "symbol": row.get("symbol"),
-                "action": row.get("side"),
-                "outcome": "BLOCKED",
-                "signal_reason": context.get("signal_reason") or row.get("block_reason"),
-                "signal": signal_summary,
-                "risk": {
-                    "allowed": False,
-                    "summary": row.get("block_reason"),
-                    "reason_codes": context.get("risk_reason_codes", []),
-                },
-                "artifact": {
-                    "created": False,
-                    "summary": "No artifact created because the risk check blocked execution.",
-                },
-                "execution": {
-                    "status": "BLOCKED",
-                    "quantity": row.get("attempted_quantity"),
-                    "price": row.get("attempted_price"),
-                    "notional": _safe_notional(row.get("attempted_quantity"), row.get("attempted_price")),
-                    "pnl": None,
-                    "artifact_id": None,
-                },
-            }
-        )
-
-    chains.sort(key=lambda row: _parse_ts(row.get("ts")), reverse=True)
-    return chains[:limit]
-
-
-def scope_records_to_run(
-    run_history_rows: list[dict[str, Any]],
-    selected_run_id: str,
-    signal_rows: list[dict[str, Any]],
-    blocked_trade_rows: list[dict[str, Any]],
-    trade_rows: list[dict[str, Any]],
-    artifact_rows: list[dict[str, Any]],
-    decision_chain_limit: int = 5,
-) -> dict[str, Any]:
-    selected_run = next((row for row in run_history_rows if row.get("run_id") == selected_run_id), None)
-    if selected_run is None:
-        return {
-            "selected_run": None,
-            "signals": [],
-            "blocked_trades": [],
-            "trades": [],
-            "artifacts": [],
-            "decision_chains": [],
-            "latest_artifact": None,
-        }
-
-    start_ts, end_ts = _run_time_window(run_history_rows, selected_run_id)
-    scoped_artifacts = _scope_artifacts_to_run(artifact_rows, selected_run_id, start_ts, end_ts)
-    artifact_ids = {row.get("id") for row in scoped_artifacts if row.get("id")}
-    scoped_trades = _scope_trades_to_run(trade_rows, artifact_ids, start_ts, end_ts)
-    scoped_blocked = _filter_rows_by_time_window(blocked_trade_rows, start_ts, end_ts)
-    scoped_signals = _filter_rows_by_time_window(signal_rows, start_ts, end_ts)
-    scoped_chains = build_decision_chains(
-        signal_rows=scoped_signals,
-        blocked_trade_rows=scoped_blocked,
-        trade_rows=scoped_trades,
-        artifact_rows=scoped_artifacts,
-        limit=decision_chain_limit,
-    )
-
-    return {
-        "selected_run": selected_run,
-        "signals": scoped_signals,
-        "blocked_trades": scoped_blocked,
-        "trades": scoped_trades,
-        "artifacts": scoped_artifacts,
-        "decision_chains": scoped_chains,
-        "latest_artifact": scoped_artifacts[0] if scoped_artifacts else None,
-        "scoping_note": (
-            "Best-effort run scoping uses artifact run_id when available and timestamp windows for related signals and blocked trades."
-        ),
+        "receipt_count": row.get("receipt_count", 0),
     }
 
 
 def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] | None:
     if not selected_run:
         return None
-    prices = selected_run.get("latest_prices", {})
     return {
         "signal_count": selected_run.get("signal_count", 0),
         "executed_count": selected_run.get("executed_count", 0),
         "blocked_count": selected_run.get("blocked_count", 0),
+        "order_count": selected_run.get("order_count", 0),
         "artifact_count": selected_run.get("artifact_count", 0),
-        "observed_prices": prices,
+        "receipt_count": selected_run.get("receipt_count", 0),
+        "observed_prices": selected_run.get("latest_prices", {}),
         "modes": selected_run.get("modes", {}),
         "market_data_provider": selected_run.get("market_data_provider"),
         "market_data_status": selected_run.get("market_data_status"),
         "requested_kraken_backend": selected_run.get("requested_kraken_backend"),
         "effective_kraken_backend": selected_run.get("effective_kraken_backend"),
         "kraken_cli_status": selected_run.get("kraken_cli_status"),
-        "why_it_matters": (
-            "This run preserves a local trail from signal to risk decision to artifact and final outcome, making the demo easier to audit."
-        ),
+        "execution_provider": selected_run.get("execution_provider"),
+        "execution_status": selected_run.get("execution_status"),
+        "requested_kraken_execution_mode": selected_run.get("requested_kraken_execution_mode"),
+        "effective_kraken_execution_mode": selected_run.get("effective_kraken_execution_mode"),
+        "live_readiness_status": selected_run.get("live_readiness_status"),
+        "why_it_matters": "This run preserves a local trail from signal to risk decision to trade intent, order lifecycle, receipt artifact, and final outcome for easier audit and judging.",
     }
 
 
-def build_agent_identity_summary(
-    settings: Any,
-    mode_summary: dict[str, Any],
-) -> dict[str, Any]:
+def build_agent_identity_summary(settings: Any, mode_summary: dict[str, Any]) -> dict[str, Any]:
     return {
         "agent_id": getattr(settings, "agent_id", "unknown"),
         "agent_name": getattr(settings, "agent_name", "unknown"),
@@ -376,6 +318,11 @@ def build_agent_identity_summary(
         "requested_kraken_backend": mode_summary.get("requested_kraken_backend"),
         "effective_kraken_backend": mode_summary.get("effective_kraken_backend"),
         "kraken_cli_status": mode_summary.get("kraken_cli_status"),
+        "execution_provider": mode_summary.get("execution_provider"),
+        "execution_status": mode_summary.get("execution_status"),
+        "requested_kraken_execution_mode": mode_summary.get("requested_kraken_execution_mode"),
+        "effective_kraken_execution_mode": mode_summary.get("effective_kraken_execution_mode"),
+        "live_readiness_status": mode_summary.get("live_readiness_status"),
         "scope": "local-only",
     }
 
@@ -405,10 +352,151 @@ def build_trust_readiness_summary(
     }
 
 
+def build_decision_chains(
+    signal_rows: list[dict[str, Any]],
+    blocked_trade_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    artifact_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]] | None = None,
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    signals = list(signal_rows)
+    trade_intents: dict[str, dict[str, Any]] = {}
+    receipts_by_trade_intent: dict[str, dict[str, Any]] = {}
+    for row in artifact_rows:
+        payload = _loads_json(row.get("payload_json"))
+        if row.get("artifact_type") == "ExecutionReceipt":
+            trade_intent_id = payload.get("trade_intent_artifact_id")
+            if trade_intent_id:
+                receipts_by_trade_intent[trade_intent_id] = row
+        elif row.get("id"):
+            trade_intents[row["id"]] = row
+
+    orders_by_artifact_id: dict[str, dict[str, Any]] = {}
+    orders_by_order_id: dict[str, dict[str, Any]] = {}
+    for row in order_rows or []:
+        if row.get("artifact_id"):
+            orders_by_artifact_id[row["artifact_id"]] = row
+        if row.get("id"):
+            orders_by_order_id[row["id"]] = row
+
+    chains: list[dict[str, Any]] = []
+    for row in trade_rows:
+        artifact = trade_intents.get(row.get("artifact_id"))
+        artifact_payload = _loads_json(artifact.get("payload_json")) if artifact else {}
+        receipt = receipts_by_trade_intent.get(row.get("artifact_id"))
+        receipt_payload = _loads_json(receipt.get("payload_json")) if receipt else {}
+        order = orders_by_order_id.get(row.get("order_id")) or orders_by_artifact_id.get(row.get("artifact_id"))
+        matched_signal = _match_signal(
+            signals=signals,
+            symbol=row.get("symbol"),
+            reason=row.get("reason"),
+            ts=row.get("ts"),
+        )
+        chains.append(
+            {
+                "ts": row.get("ts"),
+                "symbol": row.get("symbol"),
+                "action": row.get("side"),
+                "outcome": "EXECUTED",
+                "signal_reason": row.get("reason"),
+                "signal": _signal_summary(matched_signal),
+                "risk": {
+                    "allowed": True,
+                    "summary": artifact_payload.get("risk", {}).get("summary", "ALLOWED"),
+                    "reason_codes": artifact_payload.get("risk", {}).get("reason_codes", []),
+                },
+                "trade_intent": _artifact_summary(artifact),
+                "artifact": _artifact_summary(artifact),
+                "order": _order_summary(order),
+                "receipt": _receipt_summary(receipt),
+                "execution": {
+                    "status": row.get("status", "FILLED"),
+                    "quantity": row.get("quantity"),
+                    "price": row.get("price"),
+                    "notional": row.get("notional"),
+                    "pnl": row.get("pnl"),
+                    "artifact_id": row.get("artifact_id"),
+                    "order_id": row.get("order_id"),
+                    "execution_provider": row.get("execution_provider"),
+                    "receipt_id": receipt.get("id") if receipt else None,
+                    "execution_mode": receipt_payload.get("execution", {}).get("effective_execution_mode"),
+                    "requested_kraken_execution_mode": receipt_payload.get("execution", {}).get("requested_kraken_execution_mode"),
+                    "effective_kraken_execution_mode": receipt_payload.get("execution", {}).get("effective_kraken_execution_mode"),
+                },
+            }
+        )
+
+    for row in blocked_trade_rows:
+        context = _loads_json(row.get("context_json"))
+        matched_signal = _match_signal(
+            signals=signals,
+            symbol=row.get("symbol"),
+            reason=context.get("signal_reason"),
+            ts=row.get("ts"),
+        )
+        signal_summary = _signal_summary(matched_signal)
+        if not signal_summary["indicators"] and isinstance(context.get("indicators"), dict):
+            signal_summary["indicators"] = context["indicators"]
+        chains.append(
+            {
+                "ts": row.get("ts"),
+                "symbol": row.get("symbol"),
+                "action": row.get("side"),
+                "outcome": "BLOCKED",
+                "signal_reason": context.get("signal_reason") or row.get("block_reason"),
+                "signal": signal_summary,
+                "risk": {
+                    "allowed": False,
+                    "summary": row.get("block_reason"),
+                    "reason_codes": context.get("risk_reason_codes", []),
+                },
+                "trade_intent": {
+                    "created": bool(context.get("artifact_id")),
+                    "artifact_id": context.get("artifact_id"),
+                    "summary": "Trade intent exists but execution was blocked." if context.get("artifact_id") else "No artifact created because the risk or execution gate blocked the decision.",
+                },
+                "artifact": {
+                    "created": False,
+                    "summary": "No execution receipt exists because execution did not proceed.",
+                },
+                "order": {
+                    "created": False,
+                    "status": context.get("execution_status"),
+                    "execution_provider": context.get("execution_provider"),
+                    "summary": "Order was not created.",
+                },
+                "receipt": {
+                    "created": False,
+                    "summary": "Execution receipt unavailable because the order never proceeded.",
+                },
+                "execution": {
+                    "status": row.get("block_reason"),
+                    "quantity": row.get("attempted_quantity"),
+                    "price": row.get("attempted_price"),
+                    "notional": _safe_notional(row.get("attempted_quantity"), row.get("attempted_price")),
+                    "pnl": None,
+                    "artifact_id": context.get("artifact_id"),
+                    "order_id": None,
+                    "execution_provider": context.get("execution_provider"),
+                    "receipt_id": None,
+                    "execution_mode": context.get("execution_status"),
+                    "requested_kraken_execution_mode": _safe_get(context, "live_readiness", "requested_kraken_execution_mode"),
+                    "effective_kraken_execution_mode": None,
+                },
+            }
+        )
+
+    chains.sort(key=lambda row: _parse_ts(row.get("ts")), reverse=True)
+    return chains[:limit]
+
+
 def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
     signal = chain.get("signal", {})
     risk = chain.get("risk", {})
-    artifact = chain.get("artifact", {})
+    artifact = chain.get("trade_intent", chain.get("artifact", {}))
+    order = chain.get("order", {})
+    receipt = chain.get("receipt", {})
     execution = chain.get("execution", {})
     indicators = signal.get("indicators", {})
     return {
@@ -433,6 +521,11 @@ def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
         "artifact_market_data_backend": artifact.get("kraken_backend"),
         "artifact_market_data_status": artifact.get("market_data_status"),
         "artifact_kraken_cli_status": artifact.get("kraken_cli_status"),
+        "order_id": order.get("order_id"),
+        "order_status": order.get("status"),
+        "order_provider": order.get("execution_provider"),
+        "receipt_id": receipt.get("artifact_id"),
+        "receipt_status": receipt.get("status"),
         "trade_status": execution.get("status"),
         "quantity": execution.get("quantity"),
         "price_executed": execution.get("price"),
@@ -449,8 +542,10 @@ def format_decision_chain_rows(chains: list[dict[str, Any]]) -> list[dict[str, A
             "outcome": chain.get("outcome"),
             "signal_reason": chain.get("signal_reason"),
             "risk": chain.get("risk", {}).get("summary"),
-            "market_backend": chain.get("artifact", {}).get("kraken_backend") or "mock",
-            "artifact": chain.get("artifact", {}).get("artifact_id"),
+            "market_backend": chain.get("trade_intent", {}).get("kraken_backend") or chain.get("artifact", {}).get("kraken_backend") or "mock",
+            "artifact": chain.get("trade_intent", {}).get("artifact_id") or chain.get("artifact", {}).get("artifact_id"),
+            "order_id": chain.get("order", {}).get("order_id"),
+            "receipt_id": chain.get("receipt", {}).get("artifact_id"),
             "trade_status": chain.get("execution", {}).get("status"),
         }
         for chain in chains
@@ -464,6 +559,57 @@ def format_selected_run_caption(selected_run: dict[str, Any] | None) -> str:
         f"Selected run {selected_run['run_id_short']} at {selected_run['ts']}. "
         "Views below are scoped to this run where reconstruction is reliable."
     )
+
+
+def scope_records_to_run(
+    run_history_rows: list[dict[str, Any]],
+    selected_run_id: str,
+    signal_rows: list[dict[str, Any]],
+    blocked_trade_rows: list[dict[str, Any]],
+    trade_rows: list[dict[str, Any]],
+    artifact_rows: list[dict[str, Any]],
+    order_rows: list[dict[str, Any]] | None = None,
+    decision_chain_limit: int = 5,
+) -> dict[str, Any]:
+    selected_run = next((row for row in run_history_rows if row.get("run_id") == selected_run_id), None)
+    if selected_run is None:
+        return {
+            "selected_run": None,
+            "signals": [],
+            "blocked_trades": [],
+            "trades": [],
+            "orders": [],
+            "artifacts": [],
+            "decision_chains": [],
+            "latest_artifact": None,
+        }
+
+    start_ts, end_ts = _run_time_window(run_history_rows, selected_run_id)
+    scoped_artifacts = _scope_artifacts_to_run(artifact_rows, selected_run_id, start_ts, end_ts)
+    artifact_ids = {row.get("id") for row in scoped_artifacts if row.get("id")}
+    scoped_trades = _scope_trades_to_run(trade_rows, artifact_ids, start_ts, end_ts)
+    scoped_orders = _scope_orders_to_run(order_rows or [], artifact_ids, start_ts, end_ts)
+    scoped_blocked = _filter_rows_by_time_window(blocked_trade_rows, start_ts, end_ts)
+    scoped_signals = _filter_rows_by_time_window(signal_rows, start_ts, end_ts)
+    scoped_chains = build_decision_chains(
+        signal_rows=scoped_signals,
+        blocked_trade_rows=scoped_blocked,
+        trade_rows=scoped_trades,
+        artifact_rows=scoped_artifacts,
+        order_rows=scoped_orders,
+        limit=decision_chain_limit,
+    )
+    return {
+        "selected_run": selected_run,
+        "signals": scoped_signals,
+        "blocked_trades": scoped_blocked,
+        "trades": scoped_trades,
+        "orders": scoped_orders,
+        "artifacts": scoped_artifacts,
+        "decision_chains": scoped_chains,
+        "latest_artifact": scoped_artifacts[0] if scoped_artifacts else None,
+        "scoping_note": "Best-effort run scoping uses artifact run_id when available and timestamp windows for related signals, orders, and blocked trades.",
+    }
 
 
 def _match_signal(
@@ -493,7 +639,6 @@ def _run_time_window(run_history_rows: list[dict[str, Any]], selected_run_id: st
     )
     if selected_index is None:
         return None, datetime.min
-
     selected_run = run_history_rows[selected_index]
     end_ts = _parse_ts(selected_run.get("ts"))
     older_run = run_history_rows[selected_index + 1] if selected_index + 1 < len(run_history_rows) else None
@@ -553,6 +698,25 @@ def _scope_trades_to_run(
     return rows
 
 
+def _scope_orders_to_run(
+    order_rows: list[dict[str, Any]],
+    artifact_ids: set[Any],
+    start_ts: datetime | None,
+    end_ts: datetime,
+) -> list[dict[str, Any]]:
+    matched = []
+    fallback = []
+    for row in order_rows:
+        row_ts = _parse_ts(row.get("ts"))
+        if row.get("artifact_id") in artifact_ids and row.get("artifact_id") is not None:
+            matched.append(row)
+        elif row_ts <= end_ts and (start_ts is None or row_ts > start_ts):
+            fallback.append(row)
+    rows = matched if matched else fallback
+    rows.sort(key=lambda row: _parse_ts(row.get("ts")), reverse=True)
+    return rows
+
+
 def _signal_summary(row: dict[str, Any] | None) -> dict[str, Any]:
     if not row:
         return {"action": None, "reason": None, "should_execute": None, "indicators": {}}
@@ -587,14 +751,30 @@ def _artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]:
     }
 
 
-def _safe_notional(quantity: Any, price: Any) -> float | None:
-    try:
-        return round(float(quantity) * float(price), 6)
-    except (TypeError, ValueError):
-        return None
+def _order_summary(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {"created": False, "summary": "No order recorded for this decision."}
+    return {
+        "created": True,
+        "order_id": row.get("id"),
+        "status": row.get("status"),
+        "execution_provider": row.get("execution_provider"),
+        "execution_mode": row.get("execution_mode"),
+        "external_order_id": row.get("external_order_id"),
+        "summary": "Local order lifecycle entry created.",
+    }
 
 
-def _readiness_badge(readiness: dict[str, Any]) -> str:
-    passed = readiness.get("ready_checks_passed", 0)
-    total = readiness.get("ready_checks_total", 0)
-    return f"{passed}/{total} checks" if total else "N/A"
+def _receipt_summary(row: dict[str, Any] | None) -> dict[str, Any]:
+    if not row:
+        return {"created": False, "summary": "No execution receipt linked to this decision."}
+    payload = _loads_json(row.get("payload_json"))
+    execution = payload.get("execution", {})
+    return {
+        "created": True,
+        "artifact_id": row.get("id"),
+        "status": execution.get("status"),
+        "execution_provider": execution.get("execution_provider"),
+        "execution_mode": execution.get("effective_execution_mode"),
+        "summary": "Execution receipt artifact saved after order persistence.",
+    }

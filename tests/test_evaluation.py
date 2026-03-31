@@ -1,6 +1,8 @@
 from config import (
+    EXECUTION_MODE_KRAKEN,
     EXECUTION_MODE_PAPER,
     KRAKEN_BACKEND_CLI,
+    KRAKEN_EXECUTION_MODE_LIVE,
     MARKET_DATA_MODE_KRAKEN,
     Settings,
 )
@@ -130,6 +132,22 @@ def test_run_evaluation_records_cli_source_quality_when_cli_backend_is_active(tm
     assert report["market_data_source_type"] == "cli-json"
     assert report["metrics"]["source_quality_indicator"] == "Kraken CLI"
     assert report["kraken_cli_status"] == "ACTIVE"
+
+
+def test_run_evaluation_forces_internal_paper_even_if_kraken_execution_is_requested(tmp_path):
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        report_dir=tmp_path / "reports",
+        execution_mode=EXECUTION_MODE_KRAKEN,
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+    )
+    settings.ensure_paths()
+
+    report = run_evaluation(settings, cycles=1, reset_first=True, label="Forced Internal Paper")
+
+    assert report["requested_execution_mode"] == EXECUTION_MODE_PAPER
+    assert report["effective_execution_mode"] == EXECUTION_MODE_PAPER
 
 
 def test_build_best_vs_latest_summary_prefers_highest_local_score():

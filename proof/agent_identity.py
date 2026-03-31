@@ -17,11 +17,14 @@ def build_agent_identity(settings: Settings, mode_summary: dict[str, Any]) -> di
         "requested_modes": {
             "market_data_mode": mode_summary.get("requested_market_data_mode"),
             "execution_mode": mode_summary.get("requested_execution_mode"),
+            "kraken_execution_mode": mode_summary.get("requested_kraken_execution_mode"),
         },
         "effective_modes": {
             "market_data_mode": mode_summary.get("effective_market_data_mode"),
             "execution_mode": mode_summary.get("effective_execution_mode"),
+            "kraken_execution_mode": mode_summary.get("effective_kraken_execution_mode"),
         },
+        "execution_provider": mode_summary.get("execution_provider"),
         "identity_scope": "local",
         "declared_at": utc_now_iso(),
     }

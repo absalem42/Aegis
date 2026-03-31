@@ -11,10 +11,13 @@ MARKET_DATA_MODE_MOCK = "mock"
 MARKET_DATA_MODE_KRAKEN = "kraken"
 EXECUTION_MODE_PAPER = "paper"
 EXECUTION_MODE_KRAKEN = "kraken"
+KRAKEN_EXECUTION_MODE_PAPER = "paper"
+KRAKEN_EXECUTION_MODE_LIVE = "live"
 KRAKEN_BACKEND_REST = "rest"
 KRAKEN_BACKEND_CLI = "cli"
 MARKET_DATA_MODES = (MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN)
 EXECUTION_MODES = (EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN)
+KRAKEN_EXECUTION_MODES = (KRAKEN_EXECUTION_MODE_PAPER, KRAKEN_EXECUTION_MODE_LIVE)
 KRAKEN_BACKENDS = (KRAKEN_BACKEND_REST, KRAKEN_BACKEND_CLI)
 DEFAULT_AGENT_CAPABILITIES = (
     "paper-trading",
@@ -23,7 +26,8 @@ DEFAULT_AGENT_CAPABILITIES = (
     "decision-audit-trail",
     "kraken-public-market-data",
     "kraken-cli-market-data-readiness",
-    "kraken-execution-stub",
+    "kraken-cli-paper-execution",
+    "kraken-live-readiness-guarded",
     "erc8004-ready-structure",
 )
 
@@ -44,6 +48,12 @@ def _parse_execution_mode(value: str | None) -> str:
     if value in EXECUTION_MODES:
         return value
     return EXECUTION_MODE_PAPER
+
+
+def _parse_kraken_execution_mode(value: str | None) -> str:
+    if value in KRAKEN_EXECUTION_MODES:
+        return value
+    return KRAKEN_EXECUTION_MODE_PAPER
 
 
 def _parse_kraken_backend(value: str | None) -> str:
@@ -67,6 +77,7 @@ class Settings:
     symbols: Tuple[str, ...] = ("BTC/USD", "ETH/USD", "SOL/USD")
     market_data_mode: str = MARKET_DATA_MODE_MOCK
     execution_mode: str = EXECUTION_MODE_PAPER
+    kraken_execution_mode: str = KRAKEN_EXECUTION_MODE_PAPER
     kraken_backend: str = KRAKEN_BACKEND_REST
     kraken_base_url: str = os.getenv("AEGIS_KRAKEN_BASE_URL", "https://api.kraken.com")
     kraken_timeout_seconds: float = float(os.getenv("AEGIS_KRAKEN_TIMEOUT_SECONDS", "5"))
@@ -80,6 +91,31 @@ class Settings:
     kraken_cli_timeout_seconds: float = float(os.getenv("AEGIS_KRAKEN_CLI_TIMEOUT_SECONDS", "10"))
     kraken_cli_allow_fallback_to_rest: bool = field(
         default_factory=lambda: _parse_bool(os.getenv("AEGIS_KRAKEN_CLI_ALLOW_FALLBACK_TO_REST"), True)
+    )
+    kraken_execution_allow_fallback_to_internal_paper: bool = field(
+        default_factory=lambda: _parse_bool(
+            os.getenv("AEGIS_KRAKEN_EXECUTION_ALLOW_FALLBACK_TO_INTERNAL_PAPER"),
+            True,
+        )
+    )
+    enable_kraken_live: bool = field(
+        default_factory=lambda: _parse_bool(os.getenv("AEGIS_ENABLE_KRAKEN_LIVE"), False)
+    )
+    kraken_live_require_validate: bool = field(
+        default_factory=lambda: _parse_bool(os.getenv("AEGIS_KRAKEN_LIVE_REQUIRE_VALIDATE"), True)
+    )
+    kraken_live_max_notional_per_order: float = float(
+        os.getenv("AEGIS_KRAKEN_LIVE_MAX_NOTIONAL_PER_ORDER", "50")
+    )
+    kraken_live_max_daily_notional: float = float(
+        os.getenv("AEGIS_KRAKEN_LIVE_MAX_DAILY_NOTIONAL", "100")
+    )
+    kraken_live_max_orders_per_cycle: int = int(
+        os.getenv("AEGIS_KRAKEN_LIVE_MAX_ORDERS_PER_CYCLE", "1")
+    )
+    kraken_live_confirmation_text: str = os.getenv(
+        "AEGIS_KRAKEN_LIVE_CONFIRMATION_TEXT",
+        "ENABLE_LIVE_ORDERS",
     )
     agent_id: str = os.getenv("AEGIS_AGENT_ID", "aegis-local-agent")
     agent_name: str = os.getenv("AEGIS_AGENT_NAME", "Aegis")
@@ -108,6 +144,9 @@ def load_settings() -> Settings:
         report_dir=Path(os.getenv("AEGIS_REPORT_DIR", "reports")),
         market_data_mode=_parse_market_data_mode(os.getenv("AEGIS_MARKET_DATA_MODE")),
         execution_mode=_parse_execution_mode(os.getenv("AEGIS_EXECUTION_MODE")),
+        kraken_execution_mode=_parse_kraken_execution_mode(
+            os.getenv("AEGIS_KRAKEN_EXECUTION_MODE")
+        ),
         kraken_backend=_parse_kraken_backend(os.getenv("AEGIS_KRAKEN_BACKEND")),
         kraken_base_url=os.getenv("AEGIS_KRAKEN_BASE_URL", "https://api.kraken.com"),
         kraken_timeout_seconds=float(os.getenv("AEGIS_KRAKEN_TIMEOUT_SECONDS", "5")),
@@ -123,6 +162,28 @@ def load_settings() -> Settings:
         kraken_cli_allow_fallback_to_rest=_parse_bool(
             os.getenv("AEGIS_KRAKEN_CLI_ALLOW_FALLBACK_TO_REST"),
             True,
+        ),
+        kraken_execution_allow_fallback_to_internal_paper=_parse_bool(
+            os.getenv("AEGIS_KRAKEN_EXECUTION_ALLOW_FALLBACK_TO_INTERNAL_PAPER"),
+            True,
+        ),
+        enable_kraken_live=_parse_bool(os.getenv("AEGIS_ENABLE_KRAKEN_LIVE"), False),
+        kraken_live_require_validate=_parse_bool(
+            os.getenv("AEGIS_KRAKEN_LIVE_REQUIRE_VALIDATE"),
+            True,
+        ),
+        kraken_live_max_notional_per_order=float(
+            os.getenv("AEGIS_KRAKEN_LIVE_MAX_NOTIONAL_PER_ORDER", "50")
+        ),
+        kraken_live_max_daily_notional=float(
+            os.getenv("AEGIS_KRAKEN_LIVE_MAX_DAILY_NOTIONAL", "100")
+        ),
+        kraken_live_max_orders_per_cycle=int(
+            os.getenv("AEGIS_KRAKEN_LIVE_MAX_ORDERS_PER_CYCLE", "1")
+        ),
+        kraken_live_confirmation_text=os.getenv(
+            "AEGIS_KRAKEN_LIVE_CONFIRMATION_TEXT",
+            "ENABLE_LIVE_ORDERS",
         ),
         agent_id=os.getenv("AEGIS_AGENT_ID", "aegis-local-agent"),
         agent_name=os.getenv("AEGIS_AGENT_NAME", "Aegis"),

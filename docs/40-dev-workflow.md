@@ -33,6 +33,7 @@ streamlit run app.py
 ```
 
 Use the dashboard controls to run local evaluations and save reports under `reports/`.
+Evaluations remain internal-paper-only even if the app is configured for Kraken execution.
 
 ## Standard Test Commands
 
@@ -73,6 +74,7 @@ During implementation:
 - Do not add migration tooling.
 - Do not add schedulers or worker systems.
 - Do not add live trading support in v0.
+- Do not enable Kraken live order submit in the current milestone.
 - Do not introduce speculative abstractions beyond the documented future boundaries.
 
 ## Definition of Done

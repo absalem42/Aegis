@@ -8,7 +8,12 @@ from config import Settings
 from db import insert_artifact
 
 
-def save_trade_artifact(connection, settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+def save_artifact(
+    connection,
+    settings: Settings,
+    payload: dict[str, Any],
+    notes: str | None = None,
+) -> dict[str, Any]:
     artifact_id = payload["artifact_id"]
     artifact_date = payload["created_at"][:10]
     target_dir = settings.artifact_dir / artifact_date
@@ -26,8 +31,13 @@ def save_trade_artifact(connection, settings: Settings, payload: dict[str, Any])
         subject=payload["symbol"],
         payload=payload,
         digest=digest,
-        notes="Pre-execution paper trade intent.",
+        notes=notes or payload.get("notes", ""),
         path=str(target_path),
     )
 
     return {"artifact_id": artifact_id, "path": str(target_path), "hash": digest}
+
+
+def save_trade_artifact(connection, settings: Settings, payload: dict[str, Any]) -> dict[str, Any]:
+    note = "Pre-execution trade intent." if payload.get("artifact_type") == "TradeIntent" else "Execution receipt."
+    return save_artifact(connection, settings, payload, notes=note)

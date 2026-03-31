@@ -6,6 +6,7 @@ from dashboard.audit import (
     format_artifact_rows,
     format_blocked_trade_rows,
     format_latest_artifact_summary,
+    format_order_rows,
     format_run_detail,
     format_run_history_rows,
     format_selected_run_caption,
@@ -118,6 +119,32 @@ def test_artifact_and_trade_rows_are_demo_friendly():
     assert artifact_summary["risk_allowed"] is True
 
 
+def test_format_order_rows_surfaces_execution_provider():
+    rows = format_order_rows(
+        [
+            {
+                "id": "order-1",
+                "ts": "2026-03-31T00:00:05Z",
+                "run_id": "run-1",
+                "symbol": "BTC/USD",
+                "side": "BUY",
+                "quantity": 0.1,
+                "order_type": "market",
+                "artifact_id": "artifact-1",
+                "execution_provider": "Kraken CLI Paper Suite",
+                "execution_mode": "paper",
+                "status": "FILLED",
+                "external_order_id": "paper-123",
+                "response_json": '{"paper_response":{"status":"filled"}}',
+                "notes": "paper fill",
+            }
+        ]
+    )
+
+    assert rows[0]["order_id"] == "order-1"
+    assert rows[0]["execution_provider"] == "Kraken CLI Paper Suite"
+
+
 def test_build_decision_chains_links_executed_and_blocked_paths():
     signals = [
         {
@@ -149,6 +176,25 @@ def test_build_decision_chains_links_executed_and_blocked_paths():
             "status": "FILLED",
             "pnl": 0.0,
             "artifact_id": "artifact-1",
+            "order_id": "order-1",
+            "execution_provider": "Internal Paper Engine",
+        }
+    ]
+    orders = [
+        {
+            "id": "order-1",
+            "ts": "2026-03-31T00:00:05Z",
+            "symbol": "BTC/USD",
+            "side": "BUY",
+            "quantity": 0.1,
+            "order_type": "market",
+            "artifact_id": "artifact-1",
+            "execution_provider": "Internal Paper Engine",
+            "execution_mode": "paper",
+            "status": "FILLED",
+            "external_order_id": None,
+            "response_json": '{"simulated": true}',
+            "notes": "",
         }
     ]
     blocked = [
@@ -171,22 +217,34 @@ def test_build_decision_chains_links_executed_and_blocked_paths():
             "payload_json": '{"symbol": "BTC/USD", "side": "BUY", "quantity": 0.1, "price": 69420, "reason": "EMA_BULLISH_BREAKOUT", "risk": {"allowed": true, "reason_codes": []}}',
             "hash_or_digest": "abcdef1234567890abcdef1234567890",
             "path": "artifacts/2026-03-31/artifact-1.json",
+        },
+        {
+            "id": "receipt-1",
+            "ts": "2026-03-31T00:00:06Z",
+            "artifact_type": "ExecutionReceipt",
+            "subject": "BTC/USD",
+            "payload_json": '{"trade_intent_artifact_id": "artifact-1", "execution": {"status": "FILLED", "execution_provider": "Internal Paper Engine", "effective_execution_mode": "paper"}}',
+            "hash_or_digest": "abcdef1234567890abcdef1234567890",
+            "path": "artifacts/2026-03-31/receipt-1.json",
         }
     ]
 
-    chains = build_decision_chains(signals, blocked, trades, artifacts, limit=5)
+    chains = build_decision_chains(signals, blocked, trades, artifacts, orders, limit=5)
 
     assert len(chains) == 2
     assert chains[0]["outcome"] == "BLOCKED"
     assert chains[1]["outcome"] == "EXECUTED"
     assert chains[1]["artifact"]["artifact_id"] == "artifact-1"
+    assert chains[1]["order"]["order_id"] == "order-1"
+    assert chains[1]["receipt"]["artifact_id"] == "receipt-1"
     assert chains[0]["artifact"]["created"] is False
 
-    latest_summary = format_decision_chain_summary(chains[0])
+    latest_summary = format_decision_chain_summary(chains[1])
     row_summary = format_decision_chain_rows(chains)
 
-    assert latest_summary["risk_allowed"] is False
+    assert latest_summary["risk_allowed"] is True
     assert row_summary[1]["trade_status"] == "FILLED"
+    assert latest_summary["receipt_id"] == "receipt-1"
 
 
 def test_scope_records_to_run_prefers_run_id_and_time_window():
@@ -247,6 +305,7 @@ def test_scope_records_to_run_prefers_run_id_and_time_window():
             "status": "FILLED",
             "pnl": 0.0,
             "artifact_id": "artifact-new",
+            "order_id": "order-new",
         },
         {
             "ts": "2026-03-31T00:00:40Z",
@@ -258,6 +317,21 @@ def test_scope_records_to_run_prefers_run_id_and_time_window():
             "reason": "EMA_BULLISH_PULLBACK",
             "status": "FILLED",
             "pnl": 0.0,
+            "artifact_id": "artifact-old",
+            "order_id": "order-old",
+        },
+    ]
+    orders = [
+        {
+            "id": "order-new",
+            "ts": "2026-03-31T00:01:35Z",
+            "symbol": "BTC/USD",
+            "artifact_id": "artifact-new",
+        },
+        {
+            "id": "order-old",
+            "ts": "2026-03-31T00:00:40Z",
+            "symbol": "ETH/USD",
             "artifact_id": "artifact-old",
         },
     ]
@@ -282,11 +356,13 @@ def test_scope_records_to_run_prefers_run_id_and_time_window():
         },
     ]
 
-    scoped = scope_records_to_run(run_history, "run-new", signals, blocked, trades, artifacts)
+    scoped = scope_records_to_run(run_history, "run-new", signals, blocked, trades, artifacts, orders)
 
     assert scoped["selected_run"]["run_id"] == "run-new"
     assert len(scoped["trades"]) == 1
     assert scoped["trades"][0]["artifact_id"] == "artifact-new"
+    assert len(scoped["orders"]) == 1
+    assert scoped["orders"][0]["id"] == "order-new"
     assert len(scoped["artifacts"]) == 1
     assert scoped["artifacts"][0]["id"] == "artifact-new"
     assert len(scoped["blocked_trades"]) == 1

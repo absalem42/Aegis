@@ -29,13 +29,13 @@ The `.env` file is optional for v0 because safe local defaults are built in.
 streamlit run app.py
 ```
 
-The app includes local-only controls to run one engine cycle, reset runtime state, and reseed a predictable demo state.
-It also exposes explicit market-data and execution modes. The safe default is `mock` market data plus `paper` execution.
-`kraken + paper` uses real public Kraken market data when available, while all execution remains local paper execution.
-Kraken market data can run through the built-in REST adapter or an optional official Kraken CLI backend.
-Kraken execution is still a stub and does not enable live trading or authenticated exchange access.
+The app includes local-only controls to run one engine cycle, reset runtime state, reseed a predictable demo state, and run local evaluations.
+It also exposes explicit market-data and execution modes. The safe default is `mock` market data plus internal `paper` execution.
+Market data can come from mock, Kraken public REST, or an optional official Kraken CLI backend.
+Execution can run through the internal paper engine or the Kraken CLI paper suite, while SQLite remains the local audit and evaluation source of truth.
+Kraken live execution is planned and guarded, but it is not enabled in this milestone and does not place live orders.
 The dashboard also shows local agent identity and trust/validation readiness for proof artifacts; ERC-8004 publishing remains deferred.
-The app can also run a local evaluation, save JSON reports under `reports/`, and show a transparent local score. That score is internal to Aegis and is not the official hackathon leaderboard.
+The app can run local evaluations, save JSON reports under `reports/`, and show a transparent local score. That score is internal to Aegis and is not the official hackathon leaderboard. Evaluations remain internal-paper-only even if the app is configured for Kraken execution.
 
 ## Test
 
@@ -55,7 +55,8 @@ ruff check .
 - Default mode is mock market data plus paper execution.
 - Kraken public market data is supported.
 - Kraken CLI market-data alignment is supported as an optional backend.
-- Kraken execution remains a stub/readiness boundary only.
+- Kraken CLI paper execution is supported as a simulation path.
+- Kraken live execution remains a planned/readiness boundary and is blocked in this milestone.
 - Local evaluation reports and a transparent internal score are supported.
 - Local trust/readiness structure exists for proof artifacts.
 - ERC-8004 support is a stub/readiness boundary only.
