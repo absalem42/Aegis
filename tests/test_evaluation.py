@@ -5,7 +5,9 @@ from config import (
     Settings,
 )
 from evaluation import (
+    build_best_vs_latest_summary,
     calculate_local_evaluation_score,
+    format_evaluation_proof_snapshot_rows,
     list_evaluation_reports,
     load_latest_evaluation_report,
     run_evaluation,
@@ -128,3 +130,66 @@ def test_run_evaluation_records_cli_source_quality_when_cli_backend_is_active(tm
     assert report["market_data_source_type"] == "cli-json"
     assert report["metrics"]["source_quality_indicator"] == "Kraken CLI"
     assert report["kraken_cli_status"] == "ACTIVE"
+
+
+def test_build_best_vs_latest_summary_prefers_highest_local_score():
+    reports = [
+        {
+            "report_id": "latest",
+            "label": "Latest Eval",
+            "generated_at": "2026-03-31T10:00:00Z",
+            "metrics": {
+                "source_quality_indicator": "mock",
+                "total_pnl": 120.0,
+                "max_drawdown": 0.03,
+                "artifact_coverage_for_executed_decisions": 1.0,
+            },
+            "scorecard": {"score": 61.5},
+        },
+        {
+            "report_id": "best",
+            "label": "Best Eval",
+            "generated_at": "2026-03-31T09:00:00Z",
+            "metrics": {
+                "source_quality_indicator": "Kraken REST",
+                "total_pnl": 480.0,
+                "max_drawdown": 0.01,
+                "artifact_coverage_for_executed_decisions": 1.0,
+            },
+            "scorecard": {"score": 77.0},
+        },
+    ]
+
+    summary = build_best_vs_latest_summary(reports)
+
+    assert summary is not None
+    assert summary["latest"]["label"] == "Latest Eval"
+    assert summary["best"]["label"] == "Best Eval"
+    assert summary["same_report"] is False
+
+
+def test_format_evaluation_proof_snapshot_rows_surfaces_agent_and_readiness_fields():
+    reports = [
+        {
+            "generated_at": "2026-03-31T10:00:00Z",
+            "label": "Judge Eval",
+            "agent": {"agent_name": "Aegis", "version": "0.1.0"},
+            "metrics": {
+                "source_quality_indicator": "Kraken CLI",
+                "artifact_coverage_for_executed_decisions": 1.0,
+            },
+            "proof_summary": {
+                "artifact_count": 3,
+                "artifact_readiness_summary": "Artifacts contain agent identity and decision context.",
+            },
+            "scorecard": {"score": 74.25},
+        }
+    ]
+
+    rows = format_evaluation_proof_snapshot_rows(reports)
+
+    assert rows[0]["agent_name"] == "Aegis"
+    assert rows[0]["agent_version"] == "0.1.0"
+    assert rows[0]["source_quality"] == "Kraken CLI"
+    assert rows[0]["artifact_coverage"] == 1.0
+    assert "decision context" in rows[0]["readiness_summary"]

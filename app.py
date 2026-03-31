@@ -43,9 +43,11 @@ from db import (
     upsert_daily_metrics,
 )
 from evaluation import (
+    build_best_vs_latest_summary,
     build_provider_capabilities_summary,
     format_evaluation_comparison_rows,
     format_evaluation_history_rows,
+    format_evaluation_proof_snapshot_rows,
     list_evaluation_reports,
     load_latest_evaluation_report,
     run_evaluation,
@@ -325,6 +327,7 @@ def main() -> None:
     evaluation_reports = list_evaluation_reports(settings, limit=10)
     latest_evaluation_report = load_latest_evaluation_report(settings)
     provider_capabilities = build_provider_capabilities_summary()
+    best_vs_latest_summary = build_best_vs_latest_summary(evaluation_reports)
 
     st.markdown("### Local Status")
     mode_cols = st.columns(6)
@@ -457,6 +460,42 @@ def main() -> None:
         )
     else:
         st.info("Run a few evaluations to compare source quality, PnL, drawdown, artifact coverage, and local score.")
+
+    st.markdown("### Best Evaluation vs Latest Evaluation")
+    st.caption("Quick local comparison between your strongest saved score and the most recent evaluation. It is not the official leaderboard.")
+    if best_vs_latest_summary:
+        latest_eval = best_vs_latest_summary["latest"]
+        best_eval = best_vs_latest_summary["best"]
+        compare_left, compare_right = st.columns(2)
+        with compare_left:
+            st.subheader("Latest")
+            st.metric("Label", latest_eval["label"])
+            st.metric("Source Quality", latest_eval["source_quality"])
+            st.metric("Local Score", f"{float(latest_eval['local_score'] or 0.0):.2f}")
+            st.metric("Total PnL", f"{float(latest_eval['total_pnl'] or 0.0):.2f}")
+            st.metric("Max Drawdown", f"{float(latest_eval['max_drawdown'] or 0.0):.2%}")
+            st.metric("Artifact Coverage", _ratio_label(latest_eval.get("artifact_coverage")))
+        with compare_right:
+            st.subheader("Best Local Score")
+            st.metric("Label", best_eval["label"])
+            st.metric("Source Quality", best_eval["source_quality"])
+            st.metric("Local Score", f"{float(best_eval['local_score'] or 0.0):.2f}")
+            st.metric("Total PnL", f"{float(best_eval['total_pnl'] or 0.0):.2f}")
+            st.metric("Max Drawdown", f"{float(best_eval['max_drawdown'] or 0.0):.2%}")
+            st.metric("Artifact Coverage", _ratio_label(best_eval.get("artifact_coverage")))
+        st.write(best_vs_latest_summary["caption"])
+        if best_vs_latest_summary["same_report"]:
+            st.info("The latest report is also the current best local score.")
+    else:
+        st.info("Run at least one evaluation to compare the latest result with the best saved local score.")
+
+    st.markdown("### Evaluation Proof Snapshots")
+    st.caption("Compact proof-oriented snapshots showing the agent identity, source quality, artifact coverage, and trust/readiness story for recent evaluations.")
+    proof_snapshot_rows = format_evaluation_proof_snapshot_rows(evaluation_reports, limit=5)
+    if proof_snapshot_rows:
+        st.dataframe(_frame(proof_snapshot_rows), use_container_width=True)
+    else:
+        st.info("No evaluation proof snapshots yet. Run an evaluation to generate one.")
 
     st.markdown("### Trading Metrics")
     metric_cols = st.columns(4)

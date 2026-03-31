@@ -329,6 +329,45 @@ def format_evaluation_comparison_rows(reports: list[dict[str, Any]]) -> list[dic
     return rows
 
 
+def build_best_vs_latest_summary(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not reports:
+        return None
+
+    latest = reports[0]
+    best = max(reports, key=lambda report: float(report.get("scorecard", {}).get("score") or 0.0))
+    return {
+        "latest": _build_report_comparison_summary(latest),
+        "best": _build_report_comparison_summary(best),
+        "same_report": latest.get("report_id") == best.get("report_id"),
+        "caption": "Compares the highest local/internal score with the latest saved evaluation. It is not the official leaderboard.",
+    }
+
+
+def format_evaluation_proof_snapshot_rows(
+    reports: list[dict[str, Any]],
+    limit: int = 5,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for report in reports[:limit]:
+        metrics = report.get("metrics", {})
+        proof_summary = report.get("proof_summary", {})
+        agent = report.get("agent", {})
+        rows.append(
+            {
+                "generated_at": report.get("generated_at"),
+                "label": report.get("label"),
+                "agent_name": agent.get("agent_name") or "Aegis",
+                "agent_version": agent.get("version") or "unknown",
+                "source_quality": metrics.get("source_quality_indicator"),
+                "artifact_coverage": metrics.get("artifact_coverage_for_executed_decisions"),
+                "artifact_count": proof_summary.get("artifact_count"),
+                "readiness_summary": proof_summary.get("artifact_readiness_summary"),
+                "local_score": report.get("scorecard", {}).get("score"),
+            }
+        )
+    return rows
+
+
 def build_provider_capabilities_summary() -> list[dict[str, str]]:
     return [
         {
@@ -366,6 +405,19 @@ def _collect_baseline_snapshot(connection, settings: Settings) -> dict[str, Any]
         "unrealized_total": get_total_unrealized_pnl(connection),
         "starting_cash": starting_cash,
         "starting_equity": starting_cash + starting_market_value,
+    }
+
+
+def _build_report_comparison_summary(report: dict[str, Any]) -> dict[str, Any]:
+    metrics = report.get("metrics", {})
+    return {
+        "label": report.get("label"),
+        "generated_at": report.get("generated_at"),
+        "source_quality": metrics.get("source_quality_indicator"),
+        "total_pnl": metrics.get("total_pnl"),
+        "max_drawdown": metrics.get("max_drawdown"),
+        "artifact_coverage": metrics.get("artifact_coverage_for_executed_decisions"),
+        "local_score": report.get("scorecard", {}).get("score"),
     }
 
 
