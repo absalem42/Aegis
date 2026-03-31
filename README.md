@@ -30,6 +30,7 @@ streamlit run app.py
 ```
 
 The app includes local-only controls to run one engine cycle, reset runtime state, and reseed a predictable demo state.
+It also exposes explicit market-data and execution modes. The safe default is `mock` market data plus `paper` execution; Kraken-related modes are readiness stubs only and do not enable live trading.
 
 ## Test
 
@@ -46,5 +47,6 @@ ruff check .
 ## Notes
 
 - v0 is paper trading only.
-- Kraken support is a stub only.
+- Default mode is mock market data plus paper execution.
+- Kraken support is a stub/readiness boundary only.
 - ERC-8004 support is a stub only.

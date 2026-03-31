@@ -124,6 +124,7 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "risk_reason_codes": ", ".join(risk.get("reason_codes", [])),
         "path": row.get("path"),
         "hash": str(row.get("hash_or_digest", ""))[:16],
+        "modes": payload.get("modes", {}),
         "summary": "Pre-execution local TradeIntent artifact saved before a paper trade decision.",
     }
 
@@ -144,6 +145,7 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "artifact_count": summary.get("artifact_count", 0),
                 "latest_prices": summary.get("latest_prices", {}),
                 "metrics": summary.get("metrics", {}),
+                "modes": summary.get("modes", {}),
             }
         )
     return formatted
@@ -169,6 +171,7 @@ def format_run_detail(row: dict[str, Any] | None) -> dict[str, Any] | None:
         "status": row.get("status"),
         "prices_observed": row.get("latest_prices", {}),
         "metrics_snapshot": metrics,
+        "modes": row.get("modes", {}),
         "signal_count": row.get("signal_count", 0),
         "executed_count": row.get("executed_count", 0),
         "blocked_count": row.get("blocked_count", 0),
@@ -325,6 +328,7 @@ def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] |
         "blocked_count": selected_run.get("blocked_count", 0),
         "artifact_count": selected_run.get("artifact_count", 0),
         "observed_prices": prices,
+        "modes": selected_run.get("modes", {}),
         "why_it_matters": (
             "This run preserves a local trail from signal to risk decision to artifact and final outcome, making the demo easier to audit."
         ),

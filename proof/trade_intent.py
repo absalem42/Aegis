@@ -13,6 +13,7 @@ def build_trade_intent(
     quantity: float,
     price: float,
     latest_price: float,
+    mode_summary: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "artifact_id": str(uuid4()),
@@ -41,4 +42,5 @@ def build_trade_intent(
         "market_snapshot": {
             "latest_price": round(latest_price, 6),
         },
+        "modes": mode_summary,
     }

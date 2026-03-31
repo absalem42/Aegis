@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pandas as pd
 import streamlit as st
 
-from config import load_settings
+from config import (
+    EXECUTION_MODE_KRAKEN,
+    EXECUTION_MODE_PAPER,
+    MARKET_DATA_MODE_KRAKEN,
+    MARKET_DATA_MODE_MOCK,
+    load_settings,
+)
 from dashboard.audit import (
     build_proof_summary,
     format_decision_chain_rows,
@@ -30,8 +38,17 @@ from db import (
     reset_runtime_state,
     upsert_daily_metrics,
 )
-from engine import reseed_demo_state, run_engine_cycle
-from market.mock_data import MockMarketDataProvider
+from engine import reseed_demo_state, resolve_runtime_components, run_engine_cycle
+
+
+MARKET_MODE_LABELS = {
+    MARKET_DATA_MODE_MOCK: "Mock",
+    MARKET_DATA_MODE_KRAKEN: "Kraken-ready (stub)",
+}
+EXECUTION_MODE_LABELS = {
+    EXECUTION_MODE_PAPER: "Paper",
+    EXECUTION_MODE_KRAKEN: "Kraken-ready (stub)",
+}
 
 
 def _frame(rows: list[dict]) -> pd.DataFrame:
@@ -47,13 +64,10 @@ def _show_table(title: str, rows: list[dict], empty_message: str) -> None:
 
 
 def main() -> None:
-    settings = load_settings()
+    base_settings = load_settings()
     st.set_page_config(page_title="Aegis v0", layout="wide")
     st.title("Aegis v0")
     st.caption("Local paper-trading demo for BTC/USD, ETH/USD, and SOL/USD.")
-
-    provider = MockMarketDataProvider(settings.symbols)
-    latest_prices = provider.get_latest_prices()
     reseed_cycles = 2
     if "aegis_notice" not in st.session_state:
         st.session_state.aegis_notice = None
@@ -61,9 +75,27 @@ def main() -> None:
     with st.sidebar:
         st.header("Demo Controls")
         st.caption("Safe local-only controls for paper-trading demos.")
+        market_data_mode = st.selectbox(
+            "Market data mode",
+            options=[MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN],
+            index=[MARKET_DATA_MODE_MOCK, MARKET_DATA_MODE_KRAKEN].index(base_settings.market_data_mode),
+            format_func=lambda value: MARKET_MODE_LABELS[value],
+        )
+        execution_mode = st.selectbox(
+            "Execution mode",
+            options=[EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN],
+            index=[EXECUTION_MODE_PAPER, EXECUTION_MODE_KRAKEN].index(base_settings.execution_mode),
+            format_func=lambda value: EXECUTION_MODE_LABELS[value],
+        )
         reseed_cycles = int(
             st.number_input("Reseed cycles", min_value=1, max_value=5, value=2, step=1)
         )
+        settings = replace(
+            base_settings,
+            market_data_mode=market_data_mode,
+            execution_mode=execution_mode,
+        )
+        provider, _executor, mode_state = resolve_runtime_components(settings)
         if st.button("Run One Engine Cycle", type="primary", use_container_width=True):
             latest_result = run_engine_cycle(settings)
             st.session_state.aegis_notice = (
@@ -92,10 +124,14 @@ def main() -> None:
             )
             st.rerun()
 
+    latest_prices = provider.get_latest_prices()
+
     if st.session_state.aegis_notice:
         level, message = st.session_state.aegis_notice
         getattr(st, level)(message)
         st.session_state.aegis_notice = None
+    for warning in mode_state.warnings:
+        st.warning(warning)
 
     with get_connection(settings.db_path) as connection:
         init_db(connection)
@@ -121,17 +157,27 @@ def main() -> None:
 
     metrics = build_dashboard_metrics(daily_metrics)
     st.markdown("### Local Status")
-    status_cols = st.columns(5)
-    status_cols[0].metric("Mode", status_summary["mode"].upper())
-    status_cols[1].metric("Trades", f"{status_summary['trade_count']}")
-    status_cols[2].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
-    status_cols[3].metric("Open Positions", f"{status_summary['open_position_count']}")
-    status_cols[4].metric("Tracked Symbols", f"{len(settings.symbols)}")
+    status_cols = st.columns(6)
+    status_cols[0].metric("Market Data", mode_state.effective_market_data_mode.upper())
+    status_cols[1].metric("Execution", mode_state.effective_execution_mode.upper())
+    status_cols[2].metric("Trades", f"{status_summary['trade_count']}")
+    status_cols[3].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
+    status_cols[4].metric("Open Positions", f"{status_summary['open_position_count']}")
+    status_cols[5].metric("Tracked Symbols", f"{len(settings.symbols)}")
 
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
         st.write(f"Artifact directory: `{status_summary['artifact_directory']}`")
-        st.write("Execution mode: `paper`")
+        st.write(f"Execution mode: `{mode_state.effective_execution_mode}`")
+        st.write(f"Requested market data mode: `{mode_state.requested_market_data_mode}`")
+        st.write(f"Requested execution mode: `{mode_state.requested_execution_mode}`")
+
+    st.markdown("### Readiness Status")
+    st.caption("Current demo runs locally with mock data and paper execution. Kraken boundaries exist but live trading is disabled in v0.")
+    readiness_cols = st.columns(3)
+    readiness_cols[0].metric("Mock Market Data", "ACTIVE" if mode_state.effective_market_data_mode == "mock" else "OFF")
+    readiness_cols[1].metric("Paper Execution", "ACTIVE" if mode_state.effective_execution_mode == "paper" else "OFF")
+    readiness_cols[2].metric("Kraken Boundary", "READY (STUB)")
 
     st.markdown("### Trading Metrics")
     metric_cols = st.columns(4)
@@ -203,6 +249,7 @@ def main() -> None:
                     {
                         "prices_observed": run_detail["prices_observed"],
                         "metrics_snapshot": run_detail["metrics_snapshot"],
+                        "modes": run_detail["modes"],
                     }
                 )
         if proof_summary:
@@ -215,7 +262,12 @@ def main() -> None:
             proof_cols[3].metric("Artifacts", proof_summary["artifact_count"])
             proof_cols[4].metric("Observed Prices", len(proof_summary["observed_prices"]))
             st.write(proof_summary["why_it_matters"])
-            st.json({"observed_prices": proof_summary["observed_prices"]})
+            st.json(
+                {
+                    "observed_prices": proof_summary["observed_prices"],
+                    "modes": proof_summary["modes"],
+                }
+            )
         if selected_run_scope:
             st.caption(selected_run_scope["scoping_note"])
     else:
@@ -313,6 +365,7 @@ def main() -> None:
                     "signal_reason": preview["signal_reason"],
                     "risk_allowed": preview["risk_allowed"],
                     "risk_reason_codes": preview["risk_reason_codes"],
+                    "modes": preview["modes"],
                     "path": preview["path"],
                     "hash": preview["hash"],
                 }

@@ -1,9 +1,17 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import logging
 from uuid import uuid4
 
-from config import Settings, load_settings
+from config import (
+    EXECUTION_MODE_KRAKEN,
+    EXECUTION_MODE_PAPER,
+    MARKET_DATA_MODE_KRAKEN,
+    MARKET_DATA_MODE_MOCK,
+    Settings,
+    load_settings,
+)
 from db import (
     count_open_positions,
     get_cash_balance,
@@ -18,7 +26,11 @@ from db import (
     refresh_position_prices,
     upsert_daily_metrics,
 )
+from execution import ExecutionProvider
+from execution.kraken_executor import KrakenExecutorStub
 from execution.paper_executor import PaperExecutor
+from market import MarketDataProvider
+from market.kraken_client import KrakenMarketClientStub
 from market.mock_data import MockMarketDataProvider
 from models import EngineCycleResult, Signal
 from proof.artifact_store import save_trade_artifact
@@ -29,15 +41,63 @@ from strategy.regime_strategy import RegimeStrategy
 logger = logging.getLogger(__name__)
 
 
+@dataclass(slots=True)
+class RuntimeModeState:
+    requested_market_data_mode: str
+    effective_market_data_mode: str
+    requested_execution_mode: str
+    effective_execution_mode: str
+    warnings: list[str]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "requested_market_data_mode": self.requested_market_data_mode,
+            "effective_market_data_mode": self.effective_market_data_mode,
+            "requested_execution_mode": self.requested_execution_mode,
+            "effective_execution_mode": self.effective_execution_mode,
+            "warnings": self.warnings,
+        }
+
+
+def resolve_runtime_components(
+    settings: Settings,
+) -> tuple[MarketDataProvider, ExecutionProvider, RuntimeModeState]:
+    warnings: list[str] = []
+    market_provider: MarketDataProvider = MockMarketDataProvider(settings.symbols)
+    execution_provider: ExecutionProvider = PaperExecutor()
+    effective_market_mode = MARKET_DATA_MODE_MOCK
+    effective_execution_mode = EXECUTION_MODE_PAPER
+
+    if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
+        warnings.append(
+            "Kraken market data mode is stubbed in v0. Using mock market data for this session."
+        )
+        _ = KrakenMarketClientStub()
+
+    if settings.execution_mode == EXECUTION_MODE_KRAKEN:
+        warnings.append(
+            "Kraken execution mode is stubbed in v0. Using paper execution for this session."
+        )
+        _ = KrakenExecutorStub()
+
+    mode_state = RuntimeModeState(
+        requested_market_data_mode=settings.market_data_mode,
+        effective_market_data_mode=effective_market_mode,
+        requested_execution_mode=settings.execution_mode,
+        effective_execution_mode=effective_execution_mode,
+        warnings=warnings,
+    )
+    return market_provider, execution_provider, mode_state
+
+
 def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
     settings = settings or load_settings()
     logging.basicConfig(level=getattr(logging, settings.log_level.upper(), logging.INFO))
     settings.ensure_paths()
 
-    provider = MockMarketDataProvider(settings.symbols)
+    provider, executor, mode_state = resolve_runtime_components(settings)
     strategy = RegimeStrategy()
     risk_engine = RiskEngine(settings)
-    executor = PaperExecutor()
     run_id = str(uuid4())
 
     with get_connection(settings.db_path) as connection:
@@ -100,6 +160,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 quantity=quantity,
                 price=latest_prices[signal.symbol],
                 latest_price=latest_prices[signal.symbol],
+                mode_summary=mode_state.to_dict(),
             )
             artifact_meta = save_trade_artifact(connection, settings, artifact_payload)
             artifact_count += 1
@@ -122,6 +183,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
             "artifact_count": artifact_count,
             "latest_prices": latest_prices,
             "metrics": metrics,
+            "modes": mode_state.to_dict(),
         }
         record_agent_run(connection, run_id=run_id, status="COMPLETED", summary=summary)
 
