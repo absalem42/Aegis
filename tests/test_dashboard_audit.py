@@ -211,6 +211,72 @@ def test_build_decision_chains_surfaces_live_preflight_without_trade_fill():
     assert summary["no_live_submit_performed"] is True
 
 
+def test_build_decision_chains_surfaces_live_submit_with_fill_unknown():
+    signals = [
+        {
+            "ts": "2026-03-31T00:00:00Z",
+            "symbol": "BTC/USD",
+            "action": "BUY",
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "indicator_json": '{"price": 69420, "ema20": 68000, "ema50": 66000}',
+            "should_execute": 1,
+        }
+    ]
+    artifacts = [
+        {
+            "id": "artifact-intent-1",
+            "ts": "2026-03-31T00:00:01Z",
+            "artifact_type": "TradeIntent",
+            "subject": "BTC/USD",
+            "payload_json": '{"run_id":"run-1","symbol":"BTC/USD","side":"BUY","quantity":0.1,"price":69420,"reason":"EMA_BULLISH_BREAKOUT","risk":{"allowed": true,"summary":"ALLOWED","reason_codes":[]}}',
+            "hash_or_digest": "hash-intent",
+            "path": "artifacts/intent.json",
+        },
+        {
+            "id": "artifact-receipt-1",
+            "ts": "2026-03-31T00:00:02Z",
+            "artifact_type": "ExecutionReceipt",
+            "subject": "BTC/USD",
+            "payload_json": '{"trade_intent_artifact_id":"artifact-intent-1","receipt_status":"fill_unknown","no_live_submit_performed":false,"execution":{"status":"SUBMITTED_FILL_UNKNOWN","execution_provider":"Kraken CLI Live Preflight","effective_execution_mode":"kraken_live","requested_kraken_execution_mode":"live","effective_kraken_execution_mode":"live","auth_test_status":"PASSED","validate_preflight_status":"PASSED","live_preflight_status":"LIVE_SUBMITTED","submit_status":"SUBMITTED","fill_state":"fill_unknown","external_order_id":"live-123"}}',
+            "hash_or_digest": "hash-receipt",
+            "path": "artifacts/receipt.json",
+        },
+    ]
+    orders = [
+        {
+            "id": "order-1",
+            "ts": "2026-03-31T00:00:02Z",
+            "run_id": "run-1",
+            "symbol": "BTC/USD",
+            "side": "BUY",
+            "quantity": 0.1,
+            "order_type": "market",
+            "artifact_id": "artifact-intent-1",
+            "execution_provider": "Kraken CLI Live Preflight",
+            "execution_mode": "kraken_live",
+            "status": "SUBMITTED_FILL_UNKNOWN",
+            "external_order_id": "live-123",
+            "response_json": '{"requested_notional":6942.0,"no_live_submit_performed":false,"submit_attempted":true}',
+            "notes": "live submit with fill unknown",
+        }
+    ]
+
+    chains = build_decision_chains(
+        signal_rows=signals,
+        blocked_trade_rows=[],
+        trade_rows=[],
+        artifact_rows=artifacts,
+        order_rows=orders,
+    )
+    summary = format_decision_chain_summary(chains[0])
+
+    assert chains[0]["outcome"] == "SUBMITTED"
+    assert summary["submit_status"] == "SUBMITTED"
+    assert summary["fill_state"] == "fill_unknown"
+    assert summary["external_order_id"] == "live-123"
+    assert summary["no_live_submit_performed"] is False
+
+
 def test_build_decision_chains_links_executed_and_blocked_paths():
     signals = [
         {

@@ -167,6 +167,10 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "auth_test_status": execution.get("auth_test_status"),
                 "validate_preflight_status": execution.get("validate_preflight_status"),
                 "live_preflight_status": execution.get("live_preflight_status"),
+                "submit_status": execution.get("submit_status"),
+                "submit_attempted": execution.get("submit_attempted"),
+                "live_order_submission_occurred": execution.get("live_order_submission_occurred"),
+                "fill_state": execution.get("fill_state"),
                 "local_order_id": execution.get("local_order_id"),
                 "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
                 "readiness": _readiness_badge(readiness),
@@ -214,6 +218,7 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "execution": execution,
         "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
         "no_live_submit_performed": payload.get("no_live_submit_performed"),
+        "receipt_status": payload.get("receipt_status"),
         "summary": summary,
     }
 
@@ -252,7 +257,10 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "auth_test_status": modes.get("auth_test_status"),
                 "validate_preflight_status": modes.get("validate_preflight_status"),
                 "final_live_preflight_status": modes.get("final_live_preflight_status"),
-                "latest_live_preflight": summary.get("latest_live_preflight"),
+                "submit_status": modes.get("submit_status"),
+                "live_order_submission_occurred": modes.get("live_order_submission_occurred"),
+                "external_order_id": modes.get("external_order_id"),
+                "latest_live_execution": summary.get("latest_live_execution"),
             }
         )
     return formatted
@@ -312,7 +320,10 @@ def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] |
         "auth_test_status": selected_run.get("auth_test_status"),
         "validate_preflight_status": selected_run.get("validate_preflight_status"),
         "final_live_preflight_status": selected_run.get("final_live_preflight_status"),
-        "latest_live_preflight": selected_run.get("latest_live_preflight"),
+        "submit_status": selected_run.get("submit_status"),
+        "live_order_submission_occurred": selected_run.get("live_order_submission_occurred"),
+        "external_order_id": selected_run.get("external_order_id"),
+        "latest_live_execution": selected_run.get("latest_live_execution"),
         "why_it_matters": "This run preserves a local trail from signal to risk decision to trade intent, order lifecycle, receipt artifact, and final outcome for easier audit and judging.",
     }
 
@@ -338,6 +349,9 @@ def build_agent_identity_summary(settings: Any, mode_summary: dict[str, Any]) ->
         "auth_test_status": mode_summary.get("auth_test_status"),
         "validate_preflight_status": mode_summary.get("validate_preflight_status"),
         "final_live_preflight_status": mode_summary.get("final_live_preflight_status"),
+        "submit_status": mode_summary.get("submit_status"),
+        "live_order_submission_occurred": mode_summary.get("live_order_submission_occurred"),
+        "external_order_id": mode_summary.get("external_order_id"),
         "scope": "local-only",
     }
 
@@ -461,7 +475,7 @@ def build_decision_chains(
                 "ts": row.get("ts"),
                 "symbol": row.get("symbol"),
                 "action": row.get("side"),
-                "outcome": "PREFLIGHT",
+                "outcome": _order_only_outcome_label(row.get("status")),
                 "signal_reason": artifact_payload.get("reason") or row.get("notes"),
                 "signal": _signal_summary(matched_signal),
                 "risk": {
@@ -489,6 +503,11 @@ def build_decision_chains(
                     "auth_test_status": receipt_payload.get("execution", {}).get("auth_test_status"),
                     "validate_preflight_status": receipt_payload.get("execution", {}).get("validate_preflight_status"),
                     "live_preflight_status": receipt_payload.get("execution", {}).get("live_preflight_status"),
+                    "submit_status": receipt_payload.get("execution", {}).get("submit_status"),
+                    "submit_attempted": receipt_payload.get("execution", {}).get("submit_attempted"),
+                    "live_order_submission_occurred": receipt_payload.get("execution", {}).get("live_order_submission_occurred"),
+                    "fill_state": receipt_payload.get("execution", {}).get("fill_state"),
+                    "external_order_id": receipt_payload.get("execution", {}).get("external_order_id") or row.get("external_order_id"),
                     "no_live_submit_performed": receipt_payload.get("no_live_submit_performed", True),
                 },
             }
@@ -596,6 +615,9 @@ def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
         "auth_test_status": execution.get("auth_test_status"),
         "validate_preflight_status": execution.get("validate_preflight_status"),
         "live_preflight_status": execution.get("live_preflight_status"),
+        "submit_status": execution.get("submit_status"),
+        "fill_state": execution.get("fill_state"),
+        "external_order_id": execution.get("external_order_id"),
         "no_live_submit_performed": execution.get("no_live_submit_performed"),
         "trade_status": execution.get("status"),
         "quantity": execution.get("quantity"),
@@ -620,6 +642,8 @@ def format_decision_chain_rows(chains: list[dict[str, Any]]) -> list[dict[str, A
             "trade_status": chain.get("execution", {}).get("status"),
             "auth_test_status": chain.get("execution", {}).get("auth_test_status"),
             "validate_preflight_status": chain.get("execution", {}).get("validate_preflight_status"),
+            "submit_status": chain.get("execution", {}).get("submit_status"),
+            "fill_state": chain.get("execution", {}).get("fill_state"),
         }
         for chain in chains
     ]
@@ -853,5 +877,20 @@ def _receipt_summary(row: dict[str, Any] | None) -> dict[str, Any]:
         "auth_test_status": execution.get("auth_test_status"),
         "validate_preflight_status": execution.get("validate_preflight_status"),
         "live_preflight_status": execution.get("live_preflight_status"),
+        "submit_status": execution.get("submit_status"),
+        "fill_state": execution.get("fill_state"),
+        "external_order_id": execution.get("external_order_id"),
         "no_live_submit_performed": payload.get("no_live_submit_performed", True),
+        "receipt_status": payload.get("receipt_status"),
     }
+
+
+def _order_only_outcome_label(status: str | None) -> str:
+    normalized = str(status or "").upper()
+    if normalized.startswith("SUBMITTED"):
+        return "SUBMITTED"
+    if normalized.startswith("PREFLIGHT"):
+        return "PREFLIGHT"
+    if normalized == "BLOCKED":
+        return "BLOCKED"
+    return "ORDER_ONLY"

@@ -100,6 +100,11 @@ These are useful when the audit trail needs to distinguish order lifecycle from 
 
 Purpose: store local order-lifecycle records separately from fills.
 
+Notes:
+- `orders.status` may include blocked, preflight-only, submit-failed, submitted-fill-unknown, and submitted-with-fill states.
+- `trades` remain fills only. A live submit that does not return immediate fill details must not create a fake trade row.
+- `ExecutionReceipt` artifacts should point back to the local order id and describe whether the flow stopped at preflight or submitted a real order.
+
 Suggested columns:
 
 - `id`

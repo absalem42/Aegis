@@ -17,6 +17,7 @@ LIVE_READINESS_STATUS_BLOCKED_GATES = "BLOCKED_GATES"
 LIVE_READINESS_STATUS_PREFLIGHT_READY = "PREFLIGHT_READY"
 LIVE_READINESS_STATUS_PREFLIGHT_PASSED = "PREFLIGHT_PASSED"
 LIVE_READINESS_STATUS_PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
+LIVE_READINESS_STATUS_SUBMIT_READY = "SUBMIT_READY"
 
 
 def build_live_readiness_snapshot(
@@ -35,6 +36,7 @@ def build_live_readiness_snapshot(
         confirmation_phrase and confirmation_input and confirmation_input == confirmation_phrase
     )
     candidate_symbol_supported = candidate_symbol in settings.symbols if candidate_symbol else True
+    submit_symbol_allowed = candidate_symbol in settings.kraken_live_allowed_symbols if candidate_symbol else True
     per_order_cap_configured = settings.kraken_live_max_notional_per_order > 0
     daily_cap_configured = settings.kraken_live_max_daily_notional > 0
     max_orders_configured = settings.kraken_live_max_orders_per_cycle > 0
@@ -59,14 +61,17 @@ def build_live_readiness_snapshot(
         "typed_confirmation_configured": bool(confirmation_phrase),
         "typed_confirmation_matches": confirmation_matches,
         "validate_required": bool(settings.kraken_live_require_validate),
+        "live_submit_enabled": bool(settings.enable_kraken_live_submit),
+        "session_submit_opt_in": bool(settings.session_live_submit_opt_in),
         "max_notional_per_order_configured": per_order_cap_configured,
         "max_daily_notional_configured": daily_cap_configured,
         "max_orders_per_cycle_configured": max_orders_configured,
         "candidate_symbol_supported": candidate_symbol_supported,
+        "submit_symbol_allowed": submit_symbol_allowed,
         "candidate_notional_within_cap": candidate_notional_within_cap,
         "daily_notional_within_cap": daily_notional_within_cap,
         "live_candidate_limit_respected": live_candidate_limit_respected,
-        "milestone_live_submit_enabled": False,
+        "milestone_live_submit_enabled": bool(settings.enable_kraken_live_submit),
     }
     snapshot = {
         "requested_live": requested_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE,
@@ -82,6 +87,9 @@ def build_live_readiness_snapshot(
         },
         "auth_test_status": None,
         "validate_preflight_status": None,
+        "submit_attempted": False,
+        "submit_status": None,
+        "submit_ready": False,
         "preflight_ran": False,
         "no_live_submit_performed": True,
     }
@@ -121,11 +129,24 @@ def build_live_readiness_snapshot(
         "daily_notional_within_cap",
         "live_candidate_limit_respected",
     )
-    if all(checks.get(key) for key in gate_order):
+    preflight_ready = all(checks.get(key) for key in gate_order)
+    submit_gate_order = (
+        *gate_order,
+        "live_submit_enabled",
+        "session_submit_opt_in",
+        "submit_symbol_allowed",
+    )
+    submit_ready = all(checks.get(key) for key in submit_gate_order)
+    if preflight_ready:
         return {
             **snapshot,
-            "status": LIVE_READINESS_STATUS_PREFLIGHT_READY,
-            "summary": "Kraken live readiness gates passed. Aegis may run auth and validate preflight only; no live submit occurs in this milestone.",
+            "status": LIVE_READINESS_STATUS_SUBMIT_READY if submit_ready else LIVE_READINESS_STATUS_PREFLIGHT_READY,
+            "submit_ready": submit_ready,
+            "summary": (
+                "Kraken live readiness and submit gates passed. Aegis may run auth, validate, and then a guarded live submit."
+                if submit_ready
+                else "Kraken live readiness gates passed. Aegis may run auth and validate preflight only; submit remains gated."
+            ),
         }
 
     if not settings.enable_kraken_live:
@@ -148,11 +169,19 @@ def live_execution_is_blocked(readiness: dict[str, Any]) -> bool:
         LIVE_READINESS_STATUS_KRAKEN_PAPER,
         LIVE_READINESS_STATUS_PREFLIGHT_READY,
         LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
+        LIVE_READINESS_STATUS_SUBMIT_READY,
     }
 
 
 def live_preflight_can_run(readiness: dict[str, Any]) -> bool:
-    return bool(readiness.get("requested_live")) and readiness.get("status") == LIVE_READINESS_STATUS_PREFLIGHT_READY
+    return bool(readiness.get("requested_live")) and readiness.get("status") in {
+        LIVE_READINESS_STATUS_PREFLIGHT_READY,
+        LIVE_READINESS_STATUS_SUBMIT_READY,
+    }
+
+
+def live_submit_can_run(readiness: dict[str, Any]) -> bool:
+    return bool(readiness.get("requested_live")) and bool(readiness.get("submit_ready"))
 
 
 def _live_caps(settings: Settings) -> dict[str, float | int | str]:
@@ -161,4 +190,5 @@ def _live_caps(settings: Settings) -> dict[str, float | int | str]:
         "max_daily_notional": settings.kraken_live_max_daily_notional,
         "max_orders_per_cycle": settings.kraken_live_max_orders_per_cycle,
         "confirmation_text": settings.kraken_live_confirmation_text,
+        "allowed_symbols": list(settings.kraken_live_allowed_symbols),
     }

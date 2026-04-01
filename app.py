@@ -66,6 +66,8 @@ from engine import (
     EXECUTION_STATUS_ACTIVE,
     EXECUTION_STATUS_BLOCKED,
     EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER,
+    EXECUTION_STATUS_LIVE_SUBMIT_FAILED,
+    EXECUTION_STATUS_LIVE_SUBMITTED,
     EXECUTION_STATUS_PREFLIGHT_FAILED,
     EXECUTION_STATUS_PREFLIGHT_ONLY,
     EXECUTION_STATUS_PREFLIGHT_PASSED,
@@ -107,6 +109,8 @@ EXECUTION_STATUS_LABELS = {
     EXECUTION_STATUS_PREFLIGHT_ONLY: "PREFLIGHT ONLY",
     EXECUTION_STATUS_PREFLIGHT_PASSED: "PREFLIGHT PASSED",
     EXECUTION_STATUS_PREFLIGHT_FAILED: "PREFLIGHT FAILED",
+    EXECUTION_STATUS_LIVE_SUBMITTED: "LIVE SUBMITTED",
+    EXECUTION_STATUS_LIVE_SUBMIT_FAILED: "LIVE SUBMIT FAILED",
     "NOT_REQUESTED": "NOT REQUESTED",
 }
 
@@ -183,6 +187,7 @@ def main() -> None:
         kraken_execution_mode = base_settings.kraken_execution_mode
         session_live_opt_in = False
         session_live_confirmation_input = ""
+        session_live_submit_opt_in = False
         if execution_mode == EXECUTION_MODE_KRAKEN:
             kraken_execution_mode = st.selectbox(
                 "Kraken execution mode",
@@ -194,7 +199,7 @@ def main() -> None:
             )
             if kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE:
                 st.warning(
-                    "Kraken live preflight is guarded. This milestone only runs `kraken auth test` and `kraken order ... --validate`; it never submits a live order."
+                    "Kraken live is guarded. Aegis can preflight and, only if every submit gate also passes, send one real Kraken market order in a manual single-cycle run."
                 )
                 session_live_opt_in = st.checkbox(
                     "Enable live preflight for this session",
@@ -206,6 +211,12 @@ def main() -> None:
                     value=base_settings.session_live_confirmation_input,
                     help=f"Must exactly match: {base_settings.kraken_live_confirmation_text}",
                 )
+                session_live_submit_opt_in = st.checkbox(
+                    "Allow real order submission",
+                    value=base_settings.session_live_submit_opt_in,
+                    help="Second explicit gate. If unchecked, Aegis stops after auth and validate preflight.",
+                )
+                st.caption("Live submit uses real Kraken orders, is disabled by default, and is available only for manual single-cycle runs.")
         reseed_cycles = int(
             st.number_input("Reseed cycles", min_value=1, max_value=5, value=2, step=1)
         )
@@ -217,6 +228,7 @@ def main() -> None:
             kraken_execution_mode=kraken_execution_mode,
             session_live_opt_in=session_live_opt_in,
             session_live_confirmation_input=session_live_confirmation_input,
+            session_live_submit_opt_in=session_live_submit_opt_in,
         )
         provider, _executor, mode_state = resolve_runtime_components(settings)
         runs_blocked = mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
@@ -398,6 +410,9 @@ def main() -> None:
     display_auth_test_status = latest_run_status.get("auth_test_status") or "N/A"
     display_validate_status = latest_run_status.get("validate_preflight_status") or "N/A"
     display_final_live_preflight = latest_run_status.get("final_live_preflight_status") or "N/A"
+    display_submit_status = latest_run_status.get("submit_status") or "N/A"
+    display_live_submission = "YES" if latest_run_status.get("live_order_submission_occurred") else "NO"
+    display_external_order_id = latest_run_status.get("external_order_id") or "N/A"
 
     st.markdown("### Local Status")
     mode_cols = st.columns(6)
@@ -435,10 +450,12 @@ def main() -> None:
     status_cols[4].metric("Trades", f"{status_summary['trade_count']}")
     status_cols[5].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
 
-    live_status_cols = st.columns(3)
+    live_status_cols = st.columns(5)
     live_status_cols[0].metric("Auth Test Result", str(display_auth_test_status).replace("_", " "))
     live_status_cols[1].metric("Validate Result", str(display_validate_status).replace("_", " "))
     live_status_cols[2].metric("Final Live Preflight", str(display_final_live_preflight).replace("_", " "))
+    live_status_cols[3].metric("Submit Status", str(display_submit_status).replace("_", " "))
+    live_status_cols[4].metric("Real Order Submitted", display_live_submission)
 
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
@@ -458,13 +475,15 @@ def main() -> None:
         st.write(f"Latest auth test result: `{display_auth_test_status}`")
         st.write(f"Latest validate result: `{display_validate_status}`")
         st.write(f"Latest final preflight status: `{display_final_live_preflight}`")
+        st.write(f"Latest submit status: `{display_submit_status}`")
+        st.write(f"Latest external order id: `{display_external_order_id}`")
         st.write(f"Requested market data mode: `{mode_state.requested_market_data_mode}`")
         st.write(f"Requested execution mode: `{mode_state.requested_execution_mode}`")
         st.json({"live_readiness": mode_state.live_readiness})
 
     st.markdown("### Readiness Status")
     st.caption(
-        "Internal paper is the safest default. Kraken CLI paper uses the official CLI paper suite. Kraken live now supports auth and validate preflight only; no live submit is performed in this milestone."
+        "Internal paper is the safest default. Kraken CLI paper uses the official CLI paper suite. Kraken live is disabled by default and requires explicit preflight plus a second manual submit gate."
     )
     readiness_cols = st.columns(4)
     readiness_cols[0].metric("Market Provider", mode_state.market_data_provider)
@@ -473,9 +492,9 @@ def main() -> None:
     readiness_cols[3].metric("Live Status", mode_state.live_readiness_status.replace("_", " "))
 
     st.markdown("### Live Readiness Preflight")
-    st.caption("This milestone does not place live orders. It only evaluates safety gates, runs `kraken auth test`, and validates an order payload with `--validate` when all gates pass.")
+    st.caption("Aegis first evaluates safety gates, then runs `kraken auth test`, then `kraken order ... --validate`. Real order submission is a separate extra gate and is still single-cycle only.")
     live_readiness = mode_state.live_readiness or {}
-    preflight_cols = st.columns(6)
+    preflight_cols = st.columns(8)
     preflight_cols[0].metric("Live Enabled Flag", "ON" if settings.enable_kraken_live else "OFF")
     preflight_cols[1].metric("Session Opt-In", "ON" if settings.session_live_opt_in else "OFF")
     confirmation_ok = (
@@ -484,9 +503,18 @@ def main() -> None:
         and bool(settings.kraken_live_confirmation_text.strip())
     )
     preflight_cols[2].metric("Confirmation Phrase", "MATCHED" if confirmation_ok else "NOT MATCHED")
-    preflight_cols[3].metric("Auth Test", str(display_auth_test_status).replace("_", " "))
-    preflight_cols[4].metric("Validate Preflight", str(display_validate_status).replace("_", " "))
-    preflight_cols[5].metric("Final State", str(display_final_live_preflight).replace("_", " "))
+    preflight_cols[3].metric("Submit Enabled", "ON" if settings.enable_kraken_live_submit else "OFF")
+    preflight_cols[4].metric("Submit Opt-In", "ON" if settings.session_live_submit_opt_in else "OFF")
+    preflight_cols[5].metric("Auth Test", str(display_auth_test_status).replace("_", " "))
+    preflight_cols[6].metric("Validate Preflight", str(display_validate_status).replace("_", " "))
+    preflight_cols[7].metric("Final State", str(display_final_live_preflight).replace("_", " "))
+    submit_cols = st.columns(4)
+    submit_cols[0].metric("Submit Status", str(display_submit_status).replace("_", " "))
+    submit_cols[1].metric("Real Order Submitted", display_live_submission)
+    submit_cols[2].metric("External Order ID", display_external_order_id)
+    latest_live_execution = latest_run_status.get("latest_live_execution") or {}
+    fill_state = latest_live_execution.get("fill_state") or "N/A"
+    submit_cols[3].metric("Fill State", str(fill_state).replace("_", " "))
     if live_readiness:
         st.write(str(live_readiness.get("summary", "No live readiness summary yet.")))
         checks_payload = {
@@ -501,6 +529,8 @@ def main() -> None:
                 "caps": live_readiness.get("caps", {}),
                 "auth_test_status": live_readiness.get("auth_test_status"),
                 "validate_preflight_status": live_readiness.get("validate_preflight_status"),
+                "submit_status": live_readiness.get("submit_status"),
+                "submit_ready": live_readiness.get("submit_ready"),
                 "no_live_submit_performed": live_readiness.get("no_live_submit_performed", True),
             }
         )
@@ -721,7 +751,10 @@ def main() -> None:
                         "auth_test_status": selected_run.get("auth_test_status") or "N/A",
                         "validate_preflight_status": selected_run.get("validate_preflight_status") or "N/A",
                         "final_live_preflight_status": selected_run.get("final_live_preflight_status") or "N/A",
-                        "latest_live_preflight": selected_run.get("latest_live_preflight"),
+                        "submit_status": selected_run.get("submit_status") or "N/A",
+                        "live_order_submission_occurred": selected_run.get("live_order_submission_occurred"),
+                        "external_order_id": selected_run.get("external_order_id") or "N/A",
+                        "latest_live_execution": selected_run.get("latest_live_execution"),
                         "kraken_cli_status": CLI_STATUS_LABELS.get(
                             selected_run.get("kraken_cli_status"),
                             selected_run.get("kraken_cli_status"),
@@ -774,7 +807,10 @@ def main() -> None:
                     "auth_test_status": proof_summary.get("auth_test_status") or "N/A",
                     "validate_preflight_status": proof_summary.get("validate_preflight_status") or "N/A",
                     "final_live_preflight_status": proof_summary.get("final_live_preflight_status") or "N/A",
-                    "latest_live_preflight": proof_summary.get("latest_live_preflight"),
+                    "submit_status": proof_summary.get("submit_status") or "N/A",
+                    "live_order_submission_occurred": proof_summary.get("live_order_submission_occurred"),
+                    "external_order_id": proof_summary.get("external_order_id") or "N/A",
+                    "latest_live_execution": proof_summary.get("latest_live_execution"),
                     "modes": proof_summary["modes"],
                     "agent": agent_identity_summary,
                 }
@@ -830,6 +866,8 @@ def main() -> None:
             st.write(f"Receipt status: `{latest_summary['receipt_status'] or 'N/A'}`")
             st.write(f"Auth test: `{latest_summary['auth_test_status'] or 'N/A'}`")
             st.write(f"Validate: `{latest_summary['validate_preflight_status'] or 'N/A'}`")
+            st.write(f"Submit: `{latest_summary['submit_status'] or 'N/A'}`")
+            st.write(f"External order id: `{latest_summary['external_order_id'] or 'N/A'}`")
         with execution_col:
             st.subheader("Trade Outcome")
             st.write(f"Status: `{latest_summary['trade_status']}`")
@@ -837,6 +875,7 @@ def main() -> None:
             st.write(f"Price: `{latest_summary['price_executed']}`")
             st.write(f"PnL: `{latest_summary['pnl']}`")
             st.write(f"Live preflight: `{latest_summary['live_preflight_status'] or 'N/A'}`")
+            st.write(f"Fill state: `{latest_summary['fill_state'] or 'N/A'}`")
             st.write(
                 f"No live submit performed: `{latest_summary['no_live_submit_performed']}`"
             )

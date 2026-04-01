@@ -19,8 +19,9 @@ Current reality:
 
 - Public Kraken market data may be used in v0 through a direct REST adapter or an optional Kraken CLI-backed read-only path.
 - Kraken CLI paper execution may be used in v0 as a simulation path that mirrors outcomes back into local SQLite.
-- Kraken live execution remains guarded and does not submit orders in this milestone.
-- The current live-facing boundary is preflight only: `kraken auth test` and `kraken order ... --validate`, recorded locally as readiness artifacts and non-filled order lifecycle entries.
+- Kraken live execution remains guarded, disabled by default, and intended only for manual single-cycle use.
+- The current live-facing boundary supports `kraken auth test`, `kraken order ... --validate`, and a tightly gated real market submit path when all live gates pass.
+- Local receipts and order records must still distinguish blocked, preflight-only, submitted-fill-unknown, and submitted-with-fill states honestly.
 
 ## ERC-8004 / Trust Artifact Shape Later
 
@@ -50,10 +51,10 @@ The following are not acceptable in v0:
 
 ## Explicitly Deferred
 
-- Real exchange execution
-- Authenticated Kraken execution
-- Kraken live submit or broad CLI account mutation flows
-- Secret management for live trading
+- Broad or unattended real exchange execution
+- Authenticated Kraken flows beyond guarded `auth test`, validate, and single-order spot submit
+- Broad CLI account mutation flows beyond the guarded single-order spot submit path
+- Secret management for unattended live trading
 - On-chain publishing or verification
 - Production trust, dispute, or attestation workflows
 - Operational hardening for external integrations

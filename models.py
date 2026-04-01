@@ -91,6 +91,10 @@ class ExecutionOutcome:
     auth_test_status: str | None = None
     validate_preflight_status: str | None = None
     live_preflight_status: str | None = None
+    submit_attempted: bool | None = None
+    submit_status: str | None = None
+    live_order_submission_occurred: bool | None = None
+    fill_state: str | None = None
     notes: str = ""
     ts: str = field(default_factory=utc_now_iso)
 

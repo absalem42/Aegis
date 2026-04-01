@@ -140,6 +140,46 @@ class ActiveKrakenCliLivePreflightExecutor:
     def validate_market_order(self, request):
         return {"status": "validated", "symbol": request.symbol}
 
+    def submit_after_preflight(self, request, auth_payload, validate_payload):
+        return ExecutionOutcome(
+            run_id=request.run_id,
+            local_order_id=str(uuid4()),
+            symbol=request.symbol,
+            side=request.side,
+            quantity=request.quantity,
+            filled_quantity=0.0,
+            price=request.price,
+            fill_price=0.0,
+            notional=round(request.quantity * request.price, 6),
+            artifact_id=request.artifact_id,
+            order_type=request.order_type,
+            status="SUBMITTED_FILL_UNKNOWN",
+            execution_provider=self.provider_name,
+            execution_source_type="cli-live",
+            requested_execution_mode=request.requested_execution_mode,
+            effective_execution_mode="kraken_live",
+            requested_kraken_execution_mode=request.requested_kraken_execution_mode,
+            effective_kraken_execution_mode=request.mode_summary.get("effective_kraken_execution_mode"),
+            provider_metadata={
+                "auth_test": auth_payload,
+                "validate_preflight": validate_payload,
+                "submit_response": {"order_id": "live-123", "status": "submitted"},
+                "requested_notional": round(request.quantity * request.price, 6),
+                "fill_known": False,
+                "no_live_submit_performed": False,
+                "submit_attempted": True,
+            },
+            external_order_id="live-123",
+            external_status="submitted",
+            auth_test_status="PASSED",
+            validate_preflight_status="PASSED",
+            live_preflight_status="LIVE_SUBMITTED",
+            submit_attempted=True,
+            submit_status="SUBMITTED",
+            live_order_submission_occurred=True,
+            fill_state="fill_unknown",
+        )
+
 
 class AuthFailingKrakenCliLivePreflightExecutor(ActiveKrakenCliLivePreflightExecutor):
     def auth_test(self):
@@ -164,6 +204,29 @@ class SingleSignalStrategy:
                 should_execute=True,
             )
         ]
+
+
+class TwoSignalStrategy:
+    def generate_signals(self, histories):
+        items = list(histories.items())[:2]
+        signals = []
+        for symbol, history in items:
+            price = history[-1]
+            signals.append(
+                Signal(
+                    symbol=symbol,
+                    action="BUY",
+                    reason="EMA_BULLISH_BREAKOUT",
+                    indicators={"price": price, "ema20": price - 1, "ema50": price - 2},
+                    should_execute=True,
+                )
+            )
+        return signals
+
+
+class SubmitFailingKrakenCliLivePreflightExecutor(ActiveKrakenCliLivePreflightExecutor):
+    def submit_after_preflight(self, request, auth_payload, validate_payload):
+        raise KrakenCliExecutionError("simulated submit failure")
 
 
 def test_engine_cycle_creates_expected_records(tmp_path):
@@ -539,3 +602,192 @@ def test_engine_cycle_records_live_preflight_validate_failure_without_trade(tmp_
     assert result.summary["modes"]["execution_status"] == "PREFLIGHT_FAILED"
     assert result.summary["modes"]["auth_test_status"] == "PASSED"
     assert result.summary["modes"]["validate_preflight_status"] == "FAILED"
+
+
+def test_engine_cycle_submits_live_order_only_when_submit_gate_is_enabled(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: ActiveKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=True,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.summary["modes"]["execution_status"] == "LIVE_SUBMITTED"
+    assert result.summary["modes"]["submit_status"] == "SUBMITTED"
+    assert result.summary["modes"]["live_order_submission_occurred"] is True
+    assert result.summary["modes"]["external_order_id"] == "live-123"
+
+    with get_connection(settings.db_path) as connection:
+        init_db(connection)
+        orders = list_recent(connection, "orders", limit=10)
+        trades = list_recent(connection, "trades", limit=10)
+        artifacts = list_recent(connection, "artifacts", limit=10)
+
+    assert orders[0]["status"] == "SUBMITTED_FILL_UNKNOWN"
+    assert not trades
+    receipt = next(json.loads(row["payload_json"]) for row in artifacts if row["artifact_type"] == "ExecutionReceipt")
+    assert receipt["execution"]["submit_status"] == "SUBMITTED"
+    assert receipt["execution"]["live_order_submission_occurred"] is True
+    assert receipt["execution"]["fill_state"] == "fill_unknown"
+    assert receipt["no_live_submit_performed"] is False
+
+
+def test_engine_cycle_keeps_live_as_preflight_only_when_submit_gate_is_disabled(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: ActiveKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=False,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=False,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.summary["modes"]["execution_status"] == "PREFLIGHT_PASSED"
+    assert result.summary["modes"]["submit_status"] == "NOT_ATTEMPTED"
+    assert result.summary["modes"]["live_order_submission_occurred"] is False
+
+
+def test_engine_cycle_blocks_live_submit_when_symbol_is_outside_allowlist(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: ActiveKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=True,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_allowed_symbols=("ETH/USD",),
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.summary["modes"]["execution_status"] == "PREFLIGHT_PASSED"
+    assert result.summary["modes"]["submit_status"] == "NOT_ATTEMPTED"
+    assert result.summary["latest_live_execution"]["submit_attempted"] is False
+
+
+def test_engine_cycle_blocks_live_before_preflight_when_confirmation_is_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=True,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=True,
+        session_live_confirmation_input="WRONG_TEXT",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.summary["modes"]["execution_status"] == "BLOCKED"
+    assert result.summary["modes"]["auth_test_status"] == "NOT_RUN"
+    assert result.summary["modes"]["submit_status"] == "NOT_ATTEMPTED"
+
+
+def test_engine_cycle_blocks_live_before_preflight_when_multiple_live_candidates_exist(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: TwoSignalStrategy())
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=True,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+        max_open_positions=5,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.executed_count == 0
+    assert result.blocked_count >= 2
+    assert result.summary["modes"]["execution_status"] == "BLOCKED"
+
+
+def test_engine_cycle_records_live_submit_failure_without_fake_fill(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: SubmitFailingKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        enable_kraken_live_submit=True,
+        session_live_opt_in=True,
+        session_live_submit_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.executed_count == 0
+    assert result.summary["modes"]["execution_status"] == "LIVE_SUBMIT_FAILED"
+    assert result.summary["modes"]["submit_status"] == "FAILED"
+
+    with get_connection(settings.db_path) as connection:
+        init_db(connection)
+        orders = list_recent(connection, "orders", limit=10)
+        trades = list_recent(connection, "trades", limit=10)
+        artifacts = list_recent(connection, "artifacts", limit=10)
+
+    assert orders[0]["status"] == "LIVE_SUBMIT_FAILED"
+    assert not trades
+    receipt = next(json.loads(row["payload_json"]) for row in artifacts if row["artifact_type"] == "ExecutionReceipt")
+    assert receipt["receipt_status"] == "live_submit_failed"
+    assert receipt["execution"]["fill_state"] == "not_submitted"

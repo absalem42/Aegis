@@ -214,7 +214,7 @@ class KrakenCliLivePreflightExecutor:
         self.runner = KrakenCliPaperRunner(command_prefix=command_prefix, timeout_seconds=timeout_seconds)
 
     def availability_note(self) -> str:
-        return "Kraken live preflight performs auth and validate checks only. No live submit occurs in this milestone."
+        return "Kraken live execution is guarded. Aegis can run auth, validate, and an optional market submit only when all live gates pass."
 
     def auth_test(self) -> dict[str, Any]:
         payload = self.runner.run_live_json("auth", "test")
@@ -277,7 +277,98 @@ class KrakenCliLivePreflightExecutor:
             auth_test_status="PASSED",
             validate_preflight_status="PASSED",
             live_preflight_status="PREFLIGHT_PASSED",
+            submit_attempted=False,
+            submit_status="NOT_ATTEMPTED",
+            live_order_submission_occurred=False,
+            fill_state="not_submitted",
             notes="Kraken live preflight passed auth and validate checks. No live submit was performed.",
+        )
+
+    def submit_market_order(self, request: ExecutionRequest) -> dict[str, Any]:
+        pair = _pair_for_symbol(request.symbol)
+        side = request.side.upper().lower()
+        if side not in {"buy", "sell"}:
+            raise KrakenCliExecutionError(f"Unsupported Kraken CLI live submit side: {request.side}")
+        payload = self.runner.run_live_json(
+            "order",
+            side,
+            pair,
+            _format_decimal(request.quantity),
+            "--type",
+            "market",
+        )
+        return _extract_submit_payload(payload)
+
+    def submit_after_preflight(
+        self,
+        request: ExecutionRequest,
+        auth_payload: dict[str, Any],
+        validate_payload: dict[str, Any],
+    ) -> ExecutionOutcome:
+        submit_payload = self.submit_market_order(request)
+        external_order_id = _extract_optional_string(
+            submit_payload,
+            ("order_id", "txid", "id", "external_order_id"),
+        )
+        external_status = _extract_optional_string(
+            submit_payload,
+            ("status", "state", "result"),
+        ) or "submitted"
+        filled_quantity = _extract_optional_numeric(
+            submit_payload,
+            ("filled_qty", "filled_quantity", "volume_executed", "volume", "qty", "amount"),
+        )
+        fill_price = _extract_optional_numeric(
+            submit_payload,
+            ("avg_fill_price", "fill_price", "avg_price", "executed_price", "price"),
+        )
+        fill_known = (
+            filled_quantity is not None
+            and fill_price is not None
+            and filled_quantity > 0
+            and fill_price > 0
+        )
+        status = "SUBMITTED_WITH_FILL" if fill_known else "SUBMITTED_FILL_UNKNOWN"
+        return ExecutionOutcome(
+            run_id=request.run_id,
+            local_order_id=str(uuid4()),
+            symbol=request.symbol,
+            side=request.side.upper(),
+            quantity=round(request.quantity, 6),
+            filled_quantity=round(filled_quantity or 0.0, 6),
+            price=round(request.price, 6),
+            fill_price=round(fill_price or 0.0, 6),
+            notional=round(request.quantity * request.price, 6),
+            artifact_id=request.artifact_id,
+            order_type=request.order_type,
+            status=status,
+            execution_provider=self.provider_name,
+            execution_source_type="cli-live",
+            requested_execution_mode=request.requested_execution_mode,
+            effective_execution_mode="kraken_live",
+            requested_kraken_execution_mode=request.requested_kraken_execution_mode,
+            effective_kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+            provider_metadata={
+                "auth_test": auth_payload,
+                "validate_preflight": validate_payload,
+                "submit_response": submit_payload,
+                "requested_notional": round(request.quantity * request.price, 6),
+                "fill_known": fill_known,
+                "no_live_submit_performed": False,
+            },
+            external_order_id=external_order_id,
+            external_status=external_status,
+            auth_test_status="PASSED",
+            validate_preflight_status="PASSED",
+            live_preflight_status="LIVE_SUBMITTED",
+            submit_attempted=True,
+            submit_status="SUBMITTED",
+            live_order_submission_occurred=True,
+            fill_state="fill_recorded" if fill_known else "fill_unknown",
+            notes=(
+                "Kraken live submit was attempted after auth and validate checks. "
+                + ("Immediate fill details were captured." if fill_known else "Immediate fill details were not available.")
+            ),
         )
 
     def execute(self, connection, request: ExecutionRequest) -> ExecutionOutcome:
@@ -381,6 +472,18 @@ def _extract_validate_payload(payload: Any) -> dict[str, Any]:
     raise KrakenCliExecutionError("Kraken CLI validate preflight output was missing expected fields.")
 
 
+def _extract_submit_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise KrakenCliExecutionError("Kraken CLI live submit did not return a JSON object.")
+    for key in ("result", "order", "submission"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return nested
+    if any(key in payload for key in ("status", "txid", "order_id", "id", "message")):
+        return payload
+    raise KrakenCliExecutionError("Kraken CLI live submit output was missing expected fields.")
+
+
 def _extract_numeric(
     payload: dict[str, Any],
     keys: tuple[str, ...],
@@ -405,6 +508,18 @@ def _extract_optional_string(payload: dict[str, Any], keys: tuple[str, ...]) -> 
         value = payload.get(key)
         if isinstance(value, str) and value:
             return value
+    return None
+
+
+def _extract_optional_numeric(payload: dict[str, Any], keys: tuple[str, ...]) -> float | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
     return None
 
 

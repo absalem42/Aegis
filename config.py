@@ -30,6 +30,7 @@ DEFAULT_AGENT_CAPABILITIES = (
     "kraken-live-readiness-guarded",
     "erc8004-ready-structure",
 )
+DEFAULT_LIVE_ALLOWED_SYMBOLS = ("BTC/USD", "ETH/USD", "SOL/USD")
 
 
 def _parse_bool(value: str | None, default: bool = False) -> bool:
@@ -69,6 +70,13 @@ def _parse_capabilities(value: str | None) -> Tuple[str, ...]:
     return items or DEFAULT_AGENT_CAPABILITIES
 
 
+def _parse_symbols(value: str | None, default: Tuple[str, ...]) -> Tuple[str, ...]:
+    if not value:
+        return default
+    items = tuple(item.strip() for item in value.split(",") if item.strip())
+    return items or default
+
+
 @dataclass(slots=True)
 class Settings:
     db_path: Path = Path(os.getenv("AEGIS_DB_PATH", "data/aegis.db"))
@@ -101,6 +109,9 @@ class Settings:
     enable_kraken_live: bool = field(
         default_factory=lambda: _parse_bool(os.getenv("AEGIS_ENABLE_KRAKEN_LIVE"), False)
     )
+    enable_kraken_live_submit: bool = field(
+        default_factory=lambda: _parse_bool(os.getenv("AEGIS_ENABLE_KRAKEN_LIVE_SUBMIT"), False)
+    )
     kraken_live_require_validate: bool = field(
         default_factory=lambda: _parse_bool(os.getenv("AEGIS_KRAKEN_LIVE_REQUIRE_VALIDATE"), True)
     )
@@ -117,8 +128,10 @@ class Settings:
         "AEGIS_KRAKEN_LIVE_CONFIRMATION_TEXT",
         "ENABLE_LIVE_ORDERS",
     )
+    kraken_live_allowed_symbols: Tuple[str, ...] = DEFAULT_LIVE_ALLOWED_SYMBOLS
     session_live_opt_in: bool = False
     session_live_confirmation_input: str = ""
+    session_live_submit_opt_in: bool = False
     agent_id: str = os.getenv("AEGIS_AGENT_ID", "aegis-local-agent")
     agent_name: str = os.getenv("AEGIS_AGENT_NAME", "Aegis")
     agent_version: str = os.getenv("AEGIS_AGENT_VERSION", "0.1.0")
@@ -170,6 +183,10 @@ def load_settings() -> Settings:
             True,
         ),
         enable_kraken_live=_parse_bool(os.getenv("AEGIS_ENABLE_KRAKEN_LIVE"), False),
+        enable_kraken_live_submit=_parse_bool(
+            os.getenv("AEGIS_ENABLE_KRAKEN_LIVE_SUBMIT"),
+            False,
+        ),
         kraken_live_require_validate=_parse_bool(
             os.getenv("AEGIS_KRAKEN_LIVE_REQUIRE_VALIDATE"),
             True,
@@ -186,6 +203,10 @@ def load_settings() -> Settings:
         kraken_live_confirmation_text=os.getenv(
             "AEGIS_KRAKEN_LIVE_CONFIRMATION_TEXT",
             "ENABLE_LIVE_ORDERS",
+        ),
+        kraken_live_allowed_symbols=_parse_symbols(
+            os.getenv("AEGIS_KRAKEN_LIVE_ALLOWED_SYMBOLS"),
+            DEFAULT_LIVE_ALLOWED_SYMBOLS,
         ),
         agent_id=os.getenv("AEGIS_AGENT_ID", "aegis-local-agent"),
         agent_name=os.getenv("AEGIS_AGENT_NAME", "Aegis"),

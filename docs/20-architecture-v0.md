@@ -63,8 +63,9 @@ In practice:
   - Kraken CLI paper execution
 - Execution logic should be isolated from Streamlit UI code.
 - Kraken-specific behavior belongs in an adapter, not in the core engine.
-- Kraken live execution remains a guarded readiness path in this milestone.
-- The only live-facing behavior currently allowed is Kraken CLI auth plus `order ... --validate` preflight. No live submit occurs.
+- Kraken live execution remains guarded and disabled by default in this milestone.
+- The live-facing path may run Kraken CLI auth, `order ... --validate` preflight, and then one manual single-cycle market submit only when every live gate passes.
+- The broker boundary must preserve truthful states such as blocked, preflight-only, submitted-with-fill, and submitted-fill-unknown.
 - A minimal local order lifecycle may be stored separately from fills so audit views can distinguish intents, orders, receipts, and trades.
 
 ## Trust Artifact Interface Boundary
@@ -78,7 +79,7 @@ In practice:
 
 - Kraken public market data can already plug into the market data boundary through REST or an optional official CLI backend.
 - Kraken CLI paper execution can already plug into the broker boundary as a simulation path.
-- Kraken live execution still belongs in a later guarded adapter flow behind the broker boundary.
+- Kraken live execution now exists as a guarded adapter flow behind the broker boundary, but it is still intended only for explicit manual review and tiny-cap operator use.
 - ERC-8004 can later plug into artifact export or publishing paths.
 - These extension points should stay explicit but lightweight in v0.
 

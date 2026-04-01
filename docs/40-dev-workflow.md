@@ -73,9 +73,9 @@ During implementation:
 - Do not add ORM tooling.
 - Do not add migration tooling.
 - Do not add schedulers or worker systems.
-- Do not add live trading support in v0.
-- Do not enable Kraken live order submit in the current milestone.
-- Kraken live work is limited to readiness and preflight checks such as auth and validate-only CLI calls.
+- Do not broaden Kraken live beyond the current guarded single-cycle submit boundary.
+- Kraken live submit must remain disabled by default, tiny-cap, manually confirmed, and unavailable to evaluation, reset, reseed, or automation.
+- Kraken live work must keep explicit auth, validate, submit, and fill-known-vs-unknown states in the audit trail.
 - Do not introduce speculative abstractions beyond the documented future boundaries.
 
 ## Definition of Done

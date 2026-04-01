@@ -42,6 +42,9 @@ def run_evaluation(
         settings,
         execution_mode=EXECUTION_MODE_PAPER,
         kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
+        session_live_opt_in=False,
+        session_live_confirmation_input="",
+        session_live_submit_opt_in=False,
     )
     evaluation_settings.ensure_paths()
     cycles = max(1, int(cycles))

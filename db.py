@@ -297,7 +297,8 @@ def apply_execution_outcome(
 ) -> dict[str, Any]:
     insert_order(connection, outcome, notes=outcome.notes)
 
-    if outcome.status != "FILLED" or outcome.filled_quantity <= 0:
+    fill_statuses = {"FILLED", "SUBMITTED_WITH_FILL"}
+    if outcome.status not in fill_statuses or outcome.filled_quantity <= 0:
         return {
             "order_id": outcome.local_order_id,
             "trade_id": None,
@@ -438,12 +439,13 @@ def list_recent_orders(connection: sqlite3.Connection, limit: int = 10) -> list[
     return list_recent(connection, "orders", limit=limit)
 
 
-def get_daily_live_preflight_notional(connection: sqlite3.Connection, trading_day: str | None = None) -> float:
+def get_daily_live_submitted_notional(connection: sqlite3.Connection, trading_day: str | None = None) -> float:
     day_prefix = trading_day or utc_now_iso()[:10]
     rows = connection.execute(
         """
         SELECT response_json FROM orders
-        WHERE execution_mode = 'kraken_live_preflight'
+        WHERE execution_mode = 'kraken_live'
+          AND status IN ('SUBMITTED_WITH_FILL', 'SUBMITTED_FILL_UNKNOWN')
           AND ts LIKE ?
         """,
         (f"{day_prefix}%",),
@@ -634,8 +636,8 @@ def reset_runtime_state(settings: Settings) -> dict[str, Any]:
 
 
 def _execution_mode_label(outcome: ExecutionOutcome) -> str:
-    if outcome.effective_execution_mode == "kraken_live_preflight":
-        return "kraken_live_preflight"
+    if outcome.effective_execution_mode in {"kraken_live_preflight", "kraken_live"}:
+        return outcome.effective_execution_mode
     if outcome.effective_kraken_execution_mode:
         return outcome.effective_kraken_execution_mode
     return outcome.effective_execution_mode

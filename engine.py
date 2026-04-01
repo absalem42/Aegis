@@ -22,7 +22,7 @@ from db import (
     count_open_positions,
     get_cash_balance,
     get_connection,
-    get_daily_live_preflight_notional,
+    get_daily_live_submitted_notional,
     get_position,
     get_recent_trade_pnls,
     get_total_market_value,
@@ -46,6 +46,7 @@ from execution.safety import (
     build_live_readiness_snapshot,
     live_execution_is_blocked,
     live_preflight_can_run,
+    live_submit_can_run,
     LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
     LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
 )
@@ -78,6 +79,8 @@ EXECUTION_STATUS_BLOCKED = "BLOCKED"
 EXECUTION_STATUS_PREFLIGHT_ONLY = "PREFLIGHT_ONLY"
 EXECUTION_STATUS_PREFLIGHT_PASSED = "PREFLIGHT_PASSED"
 EXECUTION_STATUS_PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
+EXECUTION_STATUS_LIVE_SUBMITTED = "LIVE_SUBMITTED"
+EXECUTION_STATUS_LIVE_SUBMIT_FAILED = "LIVE_SUBMIT_FAILED"
 EXECUTION_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
 EXECUTION_MODE_BLOCKED = "blocked"
 
@@ -104,6 +107,9 @@ class RuntimeModeState:
     auth_test_status: str | None
     validate_preflight_status: str | None
     final_live_preflight_status: str | None
+    submit_status: str | None
+    live_order_submission_occurred: bool
+    external_order_id: str | None
     kraken_ohlc_interval_minutes: int
     kraken_history_length: int
     warnings: list[str]
@@ -130,6 +136,9 @@ class RuntimeModeState:
             "auth_test_status": self.auth_test_status,
             "validate_preflight_status": self.validate_preflight_status,
             "final_live_preflight_status": self.final_live_preflight_status,
+            "submit_status": self.submit_status,
+            "live_order_submission_occurred": self.live_order_submission_occurred,
+            "external_order_id": self.external_order_id,
             "kraken_ohlc_interval_minutes": self.kraken_ohlc_interval_minutes,
             "kraken_history_length": self.kraken_history_length,
             "warnings": self.warnings,
@@ -158,6 +167,9 @@ def resolve_runtime_components(
     auth_test_status: str | None = None
     validate_preflight_status: str | None = None
     final_live_preflight_status: str | None = None
+    submit_status: str | None = None
+    live_order_submission_occurred = False
+    external_order_id: str | None = None
 
     if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
         requested_kraken_backend = settings.kraken_backend
@@ -310,6 +322,9 @@ def resolve_runtime_components(
         auth_test_status=auth_test_status,
         validate_preflight_status=validate_preflight_status,
         final_live_preflight_status=final_live_preflight_status,
+        submit_status=submit_status,
+        live_order_submission_occurred=live_order_submission_occurred,
+        external_order_id=external_order_id,
         kraken_ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
         kraken_history_length=settings.kraken_history_length,
         warnings=warnings,
@@ -422,7 +437,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
         order_count = 0
         receipt_count = 0
         executable_decisions: list[dict[str, Any]] = []
-        live_preflight_summary: dict[str, Any] | None = None
+        live_execution_summary: dict[str, Any] | None = None
 
         for signal in signals:
             insert_signal(connection, signal)
@@ -520,7 +535,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
             if mode_state.requested_execution_mode == EXECUTION_MODE_KRAKEN and (
                 mode_state.requested_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
             ):
-                daily_live_notional = get_daily_live_preflight_notional(connection)
+                daily_live_notional = get_daily_live_submitted_notional(connection)
                 live_readiness = build_live_readiness_snapshot(
                     settings,
                     requested_execution_mode=mode_state.requested_execution_mode,
@@ -532,6 +547,9 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 )
                 mode_state.live_readiness = live_readiness
                 mode_state.live_readiness_status = str(live_readiness.get("status", "UNKNOWN"))
+                mode_state.submit_status = None
+                mode_state.live_order_submission_occurred = False
+                mode_state.external_order_id = None
                 request.mode_summary = mode_state.to_dict()
 
                 if mode_state.execution_status == EXECUTION_STATUS_BLOCKED or not live_preflight_can_run(live_readiness):
@@ -539,6 +557,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                     mode_state.auth_test_status = "NOT_RUN"
                     mode_state.validate_preflight_status = "NOT_RUN"
                     mode_state.final_live_preflight_status = "BLOCKED"
+                    mode_state.submit_status = "NOT_ATTEMPTED"
                     blocked_count += 1
                     outcome = _build_live_preflight_outcome(
                         request=request,
@@ -553,8 +572,9 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                             "readiness": live_readiness,
                             "requested_notional": round(quantity * signal_price, 6),
                             "no_live_submit_performed": True,
+                            "submit_attempted": False,
                         },
-                        notes="Kraken live preflight was blocked before auth and validate checks.",
+                        notes="Kraken live execution was blocked before auth and validate checks.",
                     )
                 else:
                     preflight_executor = _build_kraken_cli_live_preflight_executor(settings)
@@ -565,12 +585,15 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                         mode_state.auth_test_status = "FAILED"
                         mode_state.validate_preflight_status = "NOT_RUN"
                         mode_state.final_live_preflight_status = "PREFLIGHT_FAILED"
+                        mode_state.submit_status = "NOT_ATTEMPTED"
                         live_readiness = {
                             **live_readiness,
                             "status": LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
                             "summary": "Kraken auth test failed before validate preflight.",
                             "auth_test_status": "FAILED",
                             "validate_preflight_status": "NOT_RUN",
+                            "submit_attempted": False,
+                            "submit_status": "NOT_ATTEMPTED",
                             "preflight_ran": True,
                         }
                         blocked_count += 1
@@ -587,6 +610,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                                 "auth_test_error": str(exc),
                                 "requested_notional": round(quantity * signal_price, 6),
                                 "no_live_submit_performed": True,
+                                "submit_attempted": False,
                             },
                             notes="Kraken auth test failed. No live submit was performed.",
                         )
@@ -598,12 +622,15 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                             mode_state.auth_test_status = "PASSED"
                             mode_state.validate_preflight_status = "FAILED"
                             mode_state.final_live_preflight_status = "PREFLIGHT_FAILED"
+                            mode_state.submit_status = "NOT_ATTEMPTED"
                             live_readiness = {
                                 **live_readiness,
                                 "status": LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
                                 "summary": "Kraken auth test passed, but validate preflight failed.",
                                 "auth_test_status": "PASSED",
                                 "validate_preflight_status": "FAILED",
+                                "submit_attempted": False,
+                                "submit_status": "NOT_ATTEMPTED",
                                 "preflight_ran": True,
                             }
                             blocked_count += 1
@@ -621,6 +648,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                                     "validate_preflight_error": str(exc),
                                     "requested_notional": round(quantity * signal_price, 6),
                                     "no_live_submit_performed": True,
+                                    "submit_attempted": False,
                                 },
                                 notes="Kraken validate preflight failed. No live submit was performed.",
                             )
@@ -629,37 +657,113 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                             mode_state.auth_test_status = "PASSED"
                             mode_state.validate_preflight_status = "PASSED"
                             mode_state.final_live_preflight_status = "PREFLIGHT_PASSED"
-                            live_readiness = {
-                                **live_readiness,
-                                "status": LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
-                                "summary": "Kraken auth test and validate preflight both passed. No live submit was performed.",
-                                "auth_test_status": "PASSED",
-                                "validate_preflight_status": "PASSED",
-                                "preflight_ran": True,
-                            }
-                            outcome = _build_live_preflight_outcome(
-                                request=request,
-                                execution_provider=preflight_executor.provider_name,
-                                execution_source_type=preflight_executor.source_type,
-                                status="PREFLIGHT_PASSED",
-                                auth_test_status="PASSED",
-                                validate_preflight_status="PASSED",
-                                live_preflight_status="PREFLIGHT_PASSED",
-                                external_status="validated",
-                                provider_metadata={
-                                    "auth_test": auth_payload,
-                                    "validate_preflight": validate_payload,
-                                    "requested_notional": round(quantity * signal_price, 6),
-                                    "no_live_submit_performed": True,
-                                },
-                                notes="Kraken live preflight passed auth and validate checks. No live submit was performed.",
-                            )
+                            if not live_submit_can_run(live_readiness):
+                                mode_state.submit_status = "NOT_ATTEMPTED"
+                                live_readiness = {
+                                    **live_readiness,
+                                    "status": LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
+                                    "summary": "Kraken auth test and validate preflight both passed. Submit remained gated, so no live order was sent.",
+                                    "auth_test_status": "PASSED",
+                                    "validate_preflight_status": "PASSED",
+                                    "submit_attempted": False,
+                                    "submit_status": "NOT_ATTEMPTED",
+                                    "preflight_ran": True,
+                                }
+                                outcome = _build_live_preflight_outcome(
+                                    request=request,
+                                    execution_provider=preflight_executor.provider_name,
+                                    execution_source_type=preflight_executor.source_type,
+                                    status="PREFLIGHT_PASSED",
+                                    auth_test_status="PASSED",
+                                    validate_preflight_status="PASSED",
+                                    live_preflight_status="PREFLIGHT_PASSED",
+                                    external_status="validated",
+                                    provider_metadata={
+                                        "auth_test": auth_payload,
+                                        "validate_preflight": validate_payload,
+                                        "requested_notional": round(quantity * signal_price, 6),
+                                        "no_live_submit_performed": True,
+                                        "submit_attempted": False,
+                                    },
+                                    notes="Kraken live preflight passed auth and validate checks. No live submit was performed.",
+                                )
+                            else:
+                                try:
+                                    outcome = preflight_executor.submit_after_preflight(
+                                        request=request,
+                                        auth_payload=auth_payload,
+                                        validate_payload=validate_payload,
+                                    )
+                                except KrakenCliExecutionError as exc:
+                                    mode_state.execution_status = EXECUTION_STATUS_LIVE_SUBMIT_FAILED
+                                    mode_state.auth_test_status = "PASSED"
+                                    mode_state.validate_preflight_status = "PASSED"
+                                    mode_state.final_live_preflight_status = "LIVE_SUBMIT_FAILED"
+                                    mode_state.submit_status = "FAILED"
+                                    mode_state.live_order_submission_occurred = False
+                                    mode_state.external_order_id = None
+                                    live_readiness = {
+                                        **live_readiness,
+                                        "status": LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
+                                        "summary": "Kraken auth and validate passed, but the guarded live submit failed.",
+                                        "auth_test_status": "PASSED",
+                                        "validate_preflight_status": "PASSED",
+                                        "submit_attempted": True,
+                                        "submit_status": "FAILED",
+                                        "preflight_ran": True,
+                                        "no_live_submit_performed": True,
+                                    }
+                                    blocked_count += 1
+                                    outcome = executor_outcome_factory(
+                                        request=request,
+                                        execution_provider=preflight_executor.provider_name,
+                                        execution_source_type="cli-live",
+                                        status="LIVE_SUBMIT_FAILED",
+                                        auth_test_status="PASSED",
+                                        validate_preflight_status="PASSED",
+                                        live_preflight_status="LIVE_SUBMIT_FAILED",
+                                        external_status="submit_failed",
+                                        provider_metadata={
+                                            "auth_test": auth_payload,
+                                            "validate_preflight": validate_payload,
+                                            "submit_error": str(exc),
+                                            "requested_notional": round(quantity * signal_price, 6),
+                                            "no_live_submit_performed": True,
+                                            "submit_attempted": True,
+                                        },
+                                        notes="Kraken live submit was attempted after preflight, but the submit call failed.",
+                                        effective_execution_mode="kraken_live",
+                                    )
+                                else:
+                                    mode_state.execution_status = EXECUTION_STATUS_LIVE_SUBMITTED
+                                    mode_state.auth_test_status = "PASSED"
+                                    mode_state.validate_preflight_status = "PASSED"
+                                    mode_state.final_live_preflight_status = "LIVE_SUBMITTED"
+                                    mode_state.submit_status = "SUBMITTED"
+                                    mode_state.live_order_submission_occurred = True
+                                    mode_state.external_order_id = outcome.external_order_id
+                                    live_readiness = {
+                                        **live_readiness,
+                                        "status": LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
+                                        "summary": (
+                                            "Kraken auth and validate passed, and Aegis submitted a guarded live market order."
+                                        ),
+                                        "auth_test_status": "PASSED",
+                                        "validate_preflight_status": "PASSED",
+                                        "submit_attempted": True,
+                                        "submit_status": "SUBMITTED",
+                                        "preflight_ran": True,
+                                        "no_live_submit_performed": False,
+                                    }
                     mode_state.live_readiness = live_readiness
                     mode_state.live_readiness_status = str(live_readiness.get("status", "UNKNOWN"))
+                    mode_state.external_order_id = outcome.external_order_id
 
                 request.mode_summary = mode_state.to_dict()
                 persisted = apply_execution_outcome(connection, outcome, reason=signal.reason)
                 order_count += 1
+                if persisted.get("trade_id"):
+                    executed_count += 1
                 receipt_payload = build_execution_receipt(
                     run_id=run_id,
                     symbol=signal.symbol,
@@ -673,16 +777,26 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 save_artifact(connection, settings, receipt_payload, notes="Live preflight execution receipt.")
                 artifact_count += 1
                 receipt_count += 1
-                live_preflight_summary = {
+                live_execution_summary = {
                     "symbol": signal.symbol,
                     "status": outcome.status,
                     "auth_test_status": outcome.auth_test_status,
                     "validate_preflight_status": outcome.validate_preflight_status,
+                    "submit_status": mode_state.submit_status,
+                    "submit_attempted": bool(live_readiness.get("submit_attempted")),
+                    "live_order_submission_occurred": mode_state.live_order_submission_occurred,
+                    "external_order_id": outcome.external_order_id,
+                    "fill_state": outcome.fill_state or outcome.provider_metadata.get("fill_state"),
                     "order_id": outcome.local_order_id,
                     "artifact_id": artifact_meta["artifact_id"],
                     "receipt_live_preflight_status": outcome.live_preflight_status,
                 }
-                logger.info("Recorded live preflight for %s %s with status %s", signal.action, signal.symbol, outcome.status)
+                logger.info(
+                    "Recorded live execution path for %s %s with status %s",
+                    signal.action,
+                    signal.symbol,
+                    outcome.status,
+                )
                 continue
 
             if mode_state.execution_status == EXECUTION_STATUS_BLOCKED or live_execution_is_blocked(
@@ -759,7 +873,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
             "latest_prices": latest_prices,
             "metrics": metrics,
             "modes": mode_state.to_dict(),
-            "latest_live_preflight": live_preflight_summary,
+            "latest_live_execution": live_execution_summary,
         }
         record_agent_run(connection, run_id=run_id, status="COMPLETED", summary=summary)
 
@@ -900,6 +1014,7 @@ def _build_live_preflight_outcome(
         external_status=external_status,
         provider_metadata=provider_metadata,
         notes=notes,
+        effective_execution_mode="kraken_live_preflight",
     )
 
 
@@ -915,7 +1030,15 @@ def executor_outcome_factory(
     external_status: str,
     provider_metadata: dict[str, Any],
     notes: str,
+    effective_execution_mode: str,
 ) -> ExecutionOutcome:
+    submit_attempted = bool(provider_metadata.get("submit_attempted"))
+    no_live_submit_performed = bool(provider_metadata.get("no_live_submit_performed", True))
+    fill_state = "not_submitted"
+    if status == "SUBMITTED_WITH_FILL":
+        fill_state = "fill_recorded"
+    elif status == "SUBMITTED_FILL_UNKNOWN":
+        fill_state = "fill_unknown"
     return ExecutionOutcome(
         run_id=request.run_id,
         local_order_id=str(uuid4()),
@@ -932,7 +1055,7 @@ def executor_outcome_factory(
         execution_provider=execution_provider,
         execution_source_type=execution_source_type,
         requested_execution_mode=request.requested_execution_mode,
-        effective_execution_mode="kraken_live_preflight",
+        effective_execution_mode=effective_execution_mode,
         requested_kraken_execution_mode=request.requested_kraken_execution_mode,
         effective_kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
         provider_metadata=provider_metadata,
@@ -940,5 +1063,9 @@ def executor_outcome_factory(
         auth_test_status=auth_test_status,
         validate_preflight_status=validate_preflight_status,
         live_preflight_status=live_preflight_status,
+        submit_attempted=submit_attempted,
+        submit_status="FAILED" if status == "LIVE_SUBMIT_FAILED" else ("SUBMITTED" if submit_attempted and not no_live_submit_performed else "NOT_ATTEMPTED"),
+        live_order_submission_occurred=submit_attempted and not no_live_submit_performed,
+        fill_state=fill_state,
         notes=notes,
     )
