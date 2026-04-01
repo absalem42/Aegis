@@ -88,6 +88,9 @@ class ExecutionOutcome:
     pnl: float | None = None
     external_order_id: str | None = None
     external_status: str | None = None
+    auth_test_status: str | None = None
+    validate_preflight_status: str | None = None
+    live_preflight_status: str | None = None
     notes: str = ""
     ts: str = field(default_factory=utc_now_iso)
 

@@ -8,10 +8,12 @@ import subprocess
 from typing import Any
 from uuid import uuid4
 
+from config import KRAKEN_EXECUTION_MODE_LIVE
 from market.kraken_cli import KRAKEN_CLI_PAIR_MAP
 from models import ExecutionOutcome, ExecutionRequest
 
 SAFE_KRAKEN_CLI_PAPER_COMMANDS = frozenset({"init", "status", "buy", "sell", "reset"})
+SAFE_KRAKEN_CLI_LIVE_COMMANDS = frozenset({"auth", "order"})
 
 
 class KrakenCliExecutionError(RuntimeError):
@@ -54,6 +56,43 @@ class KrakenCliPaperRunner:
             ) from exc
         except OSError as exc:
             raise KrakenCliExecutionError(f"Kraken CLI paper command failed to start: {exc}") from exc
+
+        stdout = completed.stdout.strip()
+        stderr = completed.stderr.strip()
+        if completed.returncode != 0:
+            raise KrakenCliExecutionError(_error_message_from_cli_failure(stdout, stderr, completed.returncode))
+
+        payload = _loads_json(stdout)
+        if isinstance(payload, dict) and payload.get("error"):
+            raise KrakenCliExecutionError(_error_message_from_payload(payload))
+        return payload
+
+    def run_live_json(self, command: str, *args: str) -> Any:
+        if command not in SAFE_KRAKEN_CLI_LIVE_COMMANDS:
+            raise KrakenCliExecutionError(
+                f"Kraken CLI live command is not allowed in Aegis v0: {command}"
+            )
+
+        argv = [*self.command_tokens, command, *[str(arg) for arg in args], "-o", "json"]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                check=False,
+                shell=False,
+                text=True,
+                timeout=self.timeout_seconds,
+            )
+        except FileNotFoundError as exc:
+            raise KrakenCliExecutionError(
+                f"Kraken CLI command was not found: {' '.join(self.command_tokens)}"
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
+            raise KrakenCliExecutionError(
+                f"Kraken CLI live command timed out after {self.timeout_seconds:.0f} seconds."
+            ) from exc
+        except OSError as exc:
+            raise KrakenCliExecutionError(f"Kraken CLI live command failed to start: {exc}") from exc
 
         stdout = completed.stdout.strip()
         stderr = completed.stderr.strip()
@@ -166,6 +205,85 @@ class KrakenCliPaperExecutor:
         )
 
 
+class KrakenCliLivePreflightExecutor:
+    provider_name = "Kraken CLI Live Preflight"
+    source_type = "cli-live-preflight"
+    backend_name = "cli"
+
+    def __init__(self, command_prefix: str, timeout_seconds: float) -> None:
+        self.runner = KrakenCliPaperRunner(command_prefix=command_prefix, timeout_seconds=timeout_seconds)
+
+    def availability_note(self) -> str:
+        return "Kraken live preflight performs auth and validate checks only. No live submit occurs in this milestone."
+
+    def auth_test(self) -> dict[str, Any]:
+        payload = self.runner.run_live_json("auth", "test")
+        normalized = _extract_auth_payload(payload)
+        status_value = str(normalized.get("status", "ok")).strip().lower()
+        authenticated = normalized.get("authenticated")
+        if authenticated is False or status_value in {"error", "failed", "unauthorized"}:
+            raise KrakenCliExecutionError("Kraken CLI auth test failed.")
+        return normalized
+
+    def validate_market_order(self, request: ExecutionRequest) -> dict[str, Any]:
+        pair = _pair_for_symbol(request.symbol)
+        side = request.side.upper().lower()
+        if side not in {"buy", "sell"}:
+            raise KrakenCliExecutionError(f"Unsupported Kraken CLI live preflight side: {request.side}")
+        payload = self.runner.run_live_json(
+            "order",
+            side,
+            pair,
+            _format_decimal(request.quantity),
+            "--type",
+            "market",
+            "--validate",
+        )
+        return _extract_validate_payload(payload)
+
+    def preflight(self, request: ExecutionRequest) -> ExecutionOutcome:
+        auth_payload = self.auth_test()
+        validate_payload = self.validate_market_order(request)
+        external_status = _extract_optional_string(
+            validate_payload,
+            ("status", "state", "result"),
+        ) or "validated"
+        return ExecutionOutcome(
+            run_id=request.run_id,
+            local_order_id=str(uuid4()),
+            symbol=request.symbol,
+            side=request.side.upper(),
+            quantity=round(request.quantity, 6),
+            filled_quantity=0.0,
+            price=round(request.price, 6),
+            fill_price=0.0,
+            notional=round(request.quantity * request.price, 6),
+            artifact_id=request.artifact_id,
+            order_type=request.order_type,
+            status="PREFLIGHT_PASSED",
+            execution_provider=self.provider_name,
+            execution_source_type=self.source_type,
+            requested_execution_mode=request.requested_execution_mode,
+            effective_execution_mode="kraken_live_preflight",
+            requested_kraken_execution_mode=request.requested_kraken_execution_mode,
+            effective_kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+            provider_metadata={
+                "auth_test": auth_payload,
+                "validate_preflight": validate_payload,
+                "requested_notional": round(request.quantity * request.price, 6),
+                "no_live_submit_performed": True,
+            },
+            external_status=external_status,
+            auth_test_status="PASSED",
+            validate_preflight_status="PASSED",
+            live_preflight_status="PREFLIGHT_PASSED",
+            notes="Kraken live preflight passed auth and validate checks. No live submit was performed.",
+        )
+
+    def execute(self, connection, request: ExecutionRequest) -> ExecutionOutcome:
+        return self.preflight(request)
+
+
 def _split_command_prefix(command_prefix: str) -> list[str]:
     raw = command_prefix.strip()
     if not raw:
@@ -237,6 +355,30 @@ def _extract_order_payload(payload: Any) -> dict[str, Any]:
     if isinstance(payload, list) and payload and isinstance(payload[0], dict):
         return payload[0]
     raise KrakenCliExecutionError("Kraken CLI paper execution output did not contain an order payload.")
+
+
+def _extract_auth_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise KrakenCliExecutionError("Kraken CLI auth test did not return a JSON object.")
+    for key in ("result", "auth", "status"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return nested
+    if any(key in payload for key in ("authenticated", "status", "success", "message")):
+        return payload
+    raise KrakenCliExecutionError("Kraken CLI auth test output was missing expected fields.")
+
+
+def _extract_validate_payload(payload: Any) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise KrakenCliExecutionError("Kraken CLI validate preflight did not return a JSON object.")
+    for key in ("result", "order", "validation"):
+        nested = payload.get(key)
+        if isinstance(nested, dict):
+            return nested
+    if any(key in payload for key in ("status", "validation", "validated", "message")):
+        return payload
+    raise KrakenCliExecutionError("Kraken CLI validate preflight output was missing expected fields.")
 
 
 def _extract_numeric(

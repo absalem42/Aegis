@@ -145,6 +145,72 @@ def test_format_order_rows_surfaces_execution_provider():
     assert rows[0]["execution_provider"] == "Kraken CLI Paper Suite"
 
 
+def test_build_decision_chains_surfaces_live_preflight_without_trade_fill():
+    signals = [
+        {
+            "ts": "2026-03-31T00:00:00Z",
+            "symbol": "BTC/USD",
+            "action": "BUY",
+            "reason": "EMA_BULLISH_BREAKOUT",
+            "indicator_json": '{"price": 69420, "ema20": 68000, "ema50": 66000}',
+            "should_execute": 1,
+        }
+    ]
+    artifacts = [
+        {
+            "id": "artifact-intent-1",
+            "ts": "2026-03-31T00:00:01Z",
+            "artifact_type": "TradeIntent",
+            "subject": "BTC/USD",
+            "payload_json": '{"run_id":"run-1","symbol":"BTC/USD","side":"BUY","quantity":0.1,"price":69420,"reason":"EMA_BULLISH_BREAKOUT","risk":{"allowed": true, "summary":"ALLOWED","reason_codes": []},"agent":{"agent_name":"Aegis"},"validation_readiness":{"ready_checks_passed":4,"ready_checks_total":4},"market_data":{"provider":"Kraken Official CLI","backend":"cli","status":"ACTIVE","kraken_cli_status":"ACTIVE"}}',
+            "hash_or_digest": "hash-intent",
+            "path": "artifacts/intent.json",
+        },
+        {
+            "id": "artifact-receipt-1",
+            "ts": "2026-03-31T00:00:02Z",
+            "artifact_type": "ExecutionReceipt",
+            "subject": "BTC/USD",
+            "payload_json": '{"trade_intent_artifact_id":"artifact-intent-1","no_live_submit_performed":true,"execution":{"status":"PREFLIGHT_PASSED","execution_provider":"Kraken CLI Live Preflight","effective_execution_mode":"kraken_live_preflight","requested_kraken_execution_mode":"live","effective_kraken_execution_mode":"live","auth_test_status":"PASSED","validate_preflight_status":"PASSED","live_preflight_status":"PREFLIGHT_PASSED"}}',
+            "hash_or_digest": "hash-receipt",
+            "path": "artifacts/receipt.json",
+        },
+    ]
+    orders = [
+        {
+            "id": "order-1",
+            "ts": "2026-03-31T00:00:02Z",
+            "run_id": "run-1",
+            "symbol": "BTC/USD",
+            "side": "BUY",
+            "quantity": 0.1,
+            "order_type": "market",
+            "artifact_id": "artifact-intent-1",
+            "execution_provider": "Kraken CLI Live Preflight",
+            "execution_mode": "kraken_live_preflight",
+            "status": "PREFLIGHT_PASSED",
+            "external_order_id": None,
+            "response_json": '{"requested_notional":6942.0,"no_live_submit_performed":true}',
+            "notes": "preflight only",
+        }
+    ]
+
+    chains = build_decision_chains(
+        signal_rows=signals,
+        blocked_trade_rows=[],
+        trade_rows=[],
+        artifact_rows=artifacts,
+        order_rows=orders,
+    )
+    summary = format_decision_chain_summary(chains[0])
+
+    assert chains[0]["outcome"] == "PREFLIGHT"
+    assert summary["receipt_status"] == "PREFLIGHT_PASSED"
+    assert summary["auth_test_status"] == "PASSED"
+    assert summary["validate_preflight_status"] == "PASSED"
+    assert summary["no_live_submit_performed"] is True
+
+
 def test_build_decision_chains_links_executed_and_blocked_paths():
     signals = [
         {

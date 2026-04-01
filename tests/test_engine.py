@@ -17,6 +17,7 @@ from market.kraken_client import KrakenMarketDataError
 from market.mock_data import MockMarketDataProvider
 from models import ExecutionOutcome
 from execution.kraken_cli_executor import KrakenCliExecutionError
+from models import Signal
 
 
 class ActiveKrakenRestProvider:
@@ -127,6 +128,42 @@ class FailingKrakenCliPaperExecutor:
 
     def ensure_paper_ready(self, starting_cash: float):
         raise KrakenCliExecutionError("simulated Kraken CLI paper failure")
+
+
+class ActiveKrakenCliLivePreflightExecutor:
+    provider_name = "Kraken CLI Live Preflight"
+    source_type = "cli-live-preflight"
+
+    def auth_test(self):
+        return {"authenticated": True, "status": "ok"}
+
+    def validate_market_order(self, request):
+        return {"status": "validated", "symbol": request.symbol}
+
+
+class AuthFailingKrakenCliLivePreflightExecutor(ActiveKrakenCliLivePreflightExecutor):
+    def auth_test(self):
+        raise KrakenCliExecutionError("simulated auth failure")
+
+
+class ValidateFailingKrakenCliLivePreflightExecutor(ActiveKrakenCliLivePreflightExecutor):
+    def validate_market_order(self, request):
+        raise KrakenCliExecutionError(f"simulated validate failure for {request.symbol}")
+
+
+class SingleSignalStrategy:
+    def generate_signals(self, histories):
+        symbol = next(iter(histories))
+        price = histories[symbol][-1]
+        return [
+            Signal(
+                symbol=symbol,
+                action="BUY",
+                reason="EMA_BULLISH_BREAKOUT",
+                indicators={"price": price, "ema20": price - 1, "ema50": price - 2},
+                should_execute=True,
+            )
+        ]
 
 
 def test_engine_cycle_creates_expected_records(tmp_path):
@@ -380,16 +417,125 @@ def test_engine_cycle_blocks_when_kraken_live_is_requested(tmp_path):
 
     assert result.executed_count == 0
     assert result.blocked_count >= 1
-    assert result.summary["modes"]["effective_execution_mode"] == "blocked"
+    assert result.summary["modes"]["effective_execution_mode"] == "kraken_live_preflight"
     assert result.summary["modes"]["effective_kraken_execution_mode"] == KRAKEN_EXECUTION_MODE_LIVE
     assert result.summary["modes"]["execution_status"] == "BLOCKED"
+    assert result.summary["modes"]["auth_test_status"] == "NOT_RUN"
+    assert result.summary["modes"]["validate_preflight_status"] == "NOT_RUN"
 
     with get_connection(settings.db_path) as connection:
         init_db(connection)
         orders = list_recent(connection, "orders", limit=10)
         trades = list_recent(connection, "trades", limit=10)
-        blocked = list_recent(connection, "blocked_trades", limit=10)
+        artifacts = list_recent(connection, "artifacts", limit=10)
 
-    assert not orders
+    assert orders
     assert not trades
-    assert any(row["block_reason"] == "KRAKEN_LIVE_DISABLED" for row in blocked)
+    assert any(row["status"] == "BLOCKED" for row in orders)
+    assert any(row["artifact_type"] == "ExecutionReceipt" for row in artifacts)
+
+
+def test_engine_cycle_runs_live_preflight_without_creating_a_trade(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: ActiveKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        session_live_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.executed_count == 0
+    assert result.summary["modes"]["execution_status"] == "PREFLIGHT_PASSED"
+    assert result.summary["modes"]["auth_test_status"] == "PASSED"
+    assert result.summary["modes"]["validate_preflight_status"] == "PASSED"
+
+    with get_connection(settings.db_path) as connection:
+        init_db(connection)
+        orders = list_recent(connection, "orders", limit=10)
+        trades = list_recent(connection, "trades", limit=10)
+        artifacts = list_recent(connection, "artifacts", limit=10)
+
+    assert orders
+    assert orders[0]["status"] == "PREFLIGHT_PASSED"
+    assert not trades
+    receipt = next(json.loads(row["payload_json"]) for row in artifacts if row["artifact_type"] == "ExecutionReceipt")
+    assert receipt["execution"]["auth_test_status"] == "PASSED"
+    assert receipt["execution"]["validate_preflight_status"] == "PASSED"
+    assert receipt["execution"]["live_preflight_status"] == "PREFLIGHT_PASSED"
+    assert receipt["no_live_submit_performed"] is True
+
+
+def test_engine_cycle_records_live_preflight_auth_failure_without_trade(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: AuthFailingKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        session_live_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.executed_count == 0
+    assert result.blocked_count >= 1
+    assert result.summary["modes"]["execution_status"] == "PREFLIGHT_FAILED"
+    assert result.summary["modes"]["auth_test_status"] == "FAILED"
+    assert result.summary["modes"]["validate_preflight_status"] == "NOT_RUN"
+
+    with get_connection(settings.db_path) as connection:
+        init_db(connection)
+        trades = list_recent(connection, "trades", limit=10)
+        orders = list_recent(connection, "orders", limit=10)
+
+    assert not trades
+    assert orders[0]["status"] == "PREFLIGHT_FAILED"
+
+
+def test_engine_cycle_records_live_preflight_validate_failure_without_trade(tmp_path, monkeypatch):
+    monkeypatch.setattr("engine.RegimeStrategy", lambda: SingleSignalStrategy())
+    monkeypatch.setattr(
+        "engine._build_kraken_cli_live_preflight_executor",
+        lambda settings: ValidateFailingKrakenCliLivePreflightExecutor(),
+    )
+    settings = Settings(
+        db_path=tmp_path / "aegis.db",
+        artifact_dir=tmp_path / "artifacts",
+        execution_mode="kraken",
+        kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        enable_kraken_live=True,
+        session_live_opt_in=True,
+        session_live_confirmation_input="ENABLE_LIVE_ORDERS",
+        kraken_live_max_notional_per_order=100000.0,
+        kraken_live_max_daily_notional=100000.0,
+    )
+    settings.ensure_paths()
+
+    result = run_engine_cycle(settings)
+
+    assert result.executed_count == 0
+    assert result.blocked_count >= 1
+    assert result.summary["modes"]["execution_status"] == "PREFLIGHT_FAILED"
+    assert result.summary["modes"]["auth_test_status"] == "PASSED"
+    assert result.summary["modes"]["validate_preflight_status"] == "FAILED"

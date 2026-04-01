@@ -12,8 +12,8 @@ from config import (
     Settings,
 )
 from engine import (
-    EXECUTION_STATUS_BLOCKED,
     EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER,
+    EXECUTION_STATUS_PREFLIGHT_ONLY,
     KRAKEN_CLI_STATUS_ACTIVE,
     KRAKEN_CLI_STATUS_FALLBACK_TO_MOCK,
     KRAKEN_CLI_STATUS_FALLBACK_TO_REST,
@@ -328,7 +328,7 @@ def test_runtime_resolution_blocks_kraken_live_without_silent_fallback(tmp_path)
     provider, executor, mode_state = resolve_runtime_components(settings)
 
     assert isinstance(provider, MockMarketDataProvider)
-    assert mode_state.effective_execution_mode == "blocked"
+    assert mode_state.effective_execution_mode == "kraken_live_preflight"
     assert mode_state.effective_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
-    assert mode_state.execution_status == EXECUTION_STATUS_BLOCKED
+    assert mode_state.execution_status == EXECUTION_STATUS_PREFLIGHT_ONLY
     assert mode_state.live_readiness_status == "BLOCKED_DISABLED"

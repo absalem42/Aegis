@@ -19,3 +19,7 @@ __pycache__/
 data/*.db
 artifacts/
 reports/
+
+# Local markdown docs/notes
+*.md
+!README.md

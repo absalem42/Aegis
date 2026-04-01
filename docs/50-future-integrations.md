@@ -19,7 +19,8 @@ Current reality:
 
 - Public Kraken market data may be used in v0 through a direct REST adapter or an optional Kraken CLI-backed read-only path.
 - Kraken CLI paper execution may be used in v0 as a simulation path that mirrors outcomes back into local SQLite.
-- Kraken live execution remains guarded, blocked, and not enabled in this milestone.
+- Kraken live execution remains guarded and does not submit orders in this milestone.
+- The current live-facing boundary is preflight only: `kraken auth test` and `kraken order ... --validate`, recorded locally as readiness artifacts and non-filled order lifecycle entries.
 
 ## ERC-8004 / Trust Artifact Shape Later
 

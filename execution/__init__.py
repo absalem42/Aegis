@@ -4,7 +4,11 @@ from typing import Protocol
 
 from models import ExecutionOutcome, ExecutionRequest
 
-from .kraken_cli_executor import KrakenCliExecutionError, KrakenCliPaperExecutor
+from .kraken_cli_executor import (
+    KrakenCliExecutionError,
+    KrakenCliLivePreflightExecutor,
+    KrakenCliPaperExecutor,
+)
 from .kraken_executor import KrakenExecutorStub
 from .paper_executor import PaperExecutor
 
@@ -19,6 +23,7 @@ class ExecutionProvider(Protocol):
 __all__ = [
     "ExecutionProvider",
     "KrakenCliExecutionError",
+    "KrakenCliLivePreflightExecutor",
     "KrakenCliPaperExecutor",
     "KrakenExecutorStub",
     "PaperExecutor",

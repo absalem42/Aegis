@@ -66,6 +66,9 @@ from engine import (
     EXECUTION_STATUS_ACTIVE,
     EXECUTION_STATUS_BLOCKED,
     EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER,
+    EXECUTION_STATUS_PREFLIGHT_FAILED,
+    EXECUTION_STATUS_PREFLIGHT_ONLY,
+    EXECUTION_STATUS_PREFLIGHT_PASSED,
     reseed_demo_state,
     reset_demo_state,
     resolve_runtime_components,
@@ -101,6 +104,9 @@ EXECUTION_STATUS_LABELS = {
     EXECUTION_STATUS_ACTIVE: "ACTIVE",
     EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER: "FALLBACK TO INTERNAL PAPER",
     EXECUTION_STATUS_BLOCKED: "BLOCKED",
+    EXECUTION_STATUS_PREFLIGHT_ONLY: "PREFLIGHT ONLY",
+    EXECUTION_STATUS_PREFLIGHT_PASSED: "PREFLIGHT PASSED",
+    EXECUTION_STATUS_PREFLIGHT_FAILED: "PREFLIGHT FAILED",
     "NOT_REQUESTED": "NOT REQUESTED",
 }
 
@@ -175,6 +181,8 @@ def main() -> None:
             format_func=lambda value: EXECUTION_MODE_LABELS[value],
         )
         kraken_execution_mode = base_settings.kraken_execution_mode
+        session_live_opt_in = False
+        session_live_confirmation_input = ""
         if execution_mode == EXECUTION_MODE_KRAKEN:
             kraken_execution_mode = st.selectbox(
                 "Kraken execution mode",
@@ -184,6 +192,20 @@ def main() -> None:
                 ),
                 format_func=lambda value: KRAKEN_EXECUTION_MODE_LABELS[value],
             )
+            if kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE:
+                st.warning(
+                    "Kraken live preflight is guarded. This milestone only runs `kraken auth test` and `kraken order ... --validate`; it never submits a live order."
+                )
+                session_live_opt_in = st.checkbox(
+                    "Enable live preflight for this session",
+                    value=base_settings.session_live_opt_in,
+                    help="Required before Aegis will attempt Kraken auth and validate preflight checks.",
+                )
+                session_live_confirmation_input = st.text_input(
+                    "Type the confirmation phrase",
+                    value=base_settings.session_live_confirmation_input,
+                    help=f"Must exactly match: {base_settings.kraken_live_confirmation_text}",
+                )
         reseed_cycles = int(
             st.number_input("Reseed cycles", min_value=1, max_value=5, value=2, step=1)
         )
@@ -193,6 +215,8 @@ def main() -> None:
             execution_mode=execution_mode,
             kraken_backend=kraken_backend,
             kraken_execution_mode=kraken_execution_mode,
+            session_live_opt_in=session_live_opt_in,
+            session_live_confirmation_input=session_live_confirmation_input,
         )
         provider, _executor, mode_state = resolve_runtime_components(settings)
         runs_blocked = mode_state.market_data_status == MARKET_DATA_STATUS_UNAVAILABLE
@@ -229,7 +253,13 @@ def main() -> None:
                 f"Kraken paper reset: {bool(summary['execution_reset'])}.{warning_text}",
             )
             st.rerun()
-        if st.button("Reseed Demo State", use_container_width=True, disabled=runs_blocked):
+        live_single_cycle_only = (
+            settings.execution_mode == EXECUTION_MODE_KRAKEN
+            and settings.kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
+        )
+        if live_single_cycle_only:
+            st.caption("Kraken live preflight is single-cycle only. Reseed remains disabled in this mode.")
+        if st.button("Reseed Demo State", use_container_width=True, disabled=runs_blocked or live_single_cycle_only):
             try:
                 summary = reseed_demo_state(settings, cycles=reseed_cycles)
             except KrakenMarketDataError as exc:
@@ -273,6 +303,8 @@ def main() -> None:
             kraken_backend=evaluation_kraken_backend,
             execution_mode=EXECUTION_MODE_PAPER,
             kraken_execution_mode=KRAKEN_EXECUTION_MODE_PAPER,
+            session_live_opt_in=False,
+            session_live_confirmation_input="",
         )
         _evaluation_provider, _evaluation_executor, evaluation_mode_state = resolve_runtime_components(
             evaluation_settings
@@ -362,6 +394,10 @@ def main() -> None:
     latest_evaluation_report = load_latest_evaluation_report(settings)
     provider_capabilities = build_provider_capabilities_summary()
     best_vs_latest_summary = build_best_vs_latest_summary(evaluation_reports)
+    latest_run_status = run_history_rows[0] if run_history_rows else {}
+    display_auth_test_status = latest_run_status.get("auth_test_status") or "N/A"
+    display_validate_status = latest_run_status.get("validate_preflight_status") or "N/A"
+    display_final_live_preflight = latest_run_status.get("final_live_preflight_status") or "N/A"
 
     st.markdown("### Local Status")
     mode_cols = st.columns(6)
@@ -399,6 +435,11 @@ def main() -> None:
     status_cols[4].metric("Trades", f"{status_summary['trade_count']}")
     status_cols[5].metric("Blocked Trades", f"{status_summary['blocked_trade_count']}")
 
+    live_status_cols = st.columns(3)
+    live_status_cols[0].metric("Auth Test Result", str(display_auth_test_status).replace("_", " "))
+    live_status_cols[1].metric("Validate Result", str(display_validate_status).replace("_", " "))
+    live_status_cols[2].metric("Final Live Preflight", str(display_final_live_preflight).replace("_", " "))
+
     with st.expander("Environment Details", expanded=False):
         st.write(f"Database path: `{status_summary['database_path']}`")
         st.write(f"Artifact directory: `{status_summary['artifact_directory']}`")
@@ -414,19 +455,55 @@ def main() -> None:
         st.write(f"Execution source type: `{mode_state.execution_source_type}`")
         st.write(f"Execution status: `{mode_state.execution_status}`")
         st.write(f"Live readiness status: `{mode_state.live_readiness_status}`")
+        st.write(f"Latest auth test result: `{display_auth_test_status}`")
+        st.write(f"Latest validate result: `{display_validate_status}`")
+        st.write(f"Latest final preflight status: `{display_final_live_preflight}`")
         st.write(f"Requested market data mode: `{mode_state.requested_market_data_mode}`")
         st.write(f"Requested execution mode: `{mode_state.requested_execution_mode}`")
         st.json({"live_readiness": mode_state.live_readiness})
 
     st.markdown("### Readiness Status")
     st.caption(
-        "Internal paper is the safest default. Kraken CLI paper uses the official CLI paper suite. Kraken live is planned and guarded, but not enabled in this milestone."
+        "Internal paper is the safest default. Kraken CLI paper uses the official CLI paper suite. Kraken live now supports auth and validate preflight only; no live submit is performed in this milestone."
     )
     readiness_cols = st.columns(4)
     readiness_cols[0].metric("Market Provider", mode_state.market_data_provider)
     readiness_cols[1].metric("Kraken Backend", _backend_label(mode_state.effective_kraken_backend))
     readiness_cols[2].metric("Execution Provider", mode_state.execution_provider)
     readiness_cols[3].metric("Live Status", mode_state.live_readiness_status.replace("_", " "))
+
+    st.markdown("### Live Readiness Preflight")
+    st.caption("This milestone does not place live orders. It only evaluates safety gates, runs `kraken auth test`, and validates an order payload with `--validate` when all gates pass.")
+    live_readiness = mode_state.live_readiness or {}
+    preflight_cols = st.columns(6)
+    preflight_cols[0].metric("Live Enabled Flag", "ON" if settings.enable_kraken_live else "OFF")
+    preflight_cols[1].metric("Session Opt-In", "ON" if settings.session_live_opt_in else "OFF")
+    confirmation_ok = (
+        settings.session_live_confirmation_input.strip()
+        == settings.kraken_live_confirmation_text.strip()
+        and bool(settings.kraken_live_confirmation_text.strip())
+    )
+    preflight_cols[2].metric("Confirmation Phrase", "MATCHED" if confirmation_ok else "NOT MATCHED")
+    preflight_cols[3].metric("Auth Test", str(display_auth_test_status).replace("_", " "))
+    preflight_cols[4].metric("Validate Preflight", str(display_validate_status).replace("_", " "))
+    preflight_cols[5].metric("Final State", str(display_final_live_preflight).replace("_", " "))
+    if live_readiness:
+        st.write(str(live_readiness.get("summary", "No live readiness summary yet.")))
+        checks_payload = {
+            key: ("PASS" if value else "BLOCKED")
+            for key, value in live_readiness.get("checks", {}).items()
+        }
+        st.json(
+            {
+                "status": live_readiness.get("status"),
+                "checks": checks_payload,
+                "candidate": live_readiness.get("candidate", {}),
+                "caps": live_readiness.get("caps", {}),
+                "auth_test_status": live_readiness.get("auth_test_status"),
+                "validate_preflight_status": live_readiness.get("validate_preflight_status"),
+                "no_live_submit_performed": live_readiness.get("no_live_submit_performed", True),
+            }
+        )
 
     trust_left, trust_right = st.columns(2)
     with trust_left:
@@ -641,6 +718,10 @@ def main() -> None:
                         "requested_kraken_execution_mode": selected_run.get("requested_kraken_execution_mode") or "N/A",
                         "effective_kraken_execution_mode": selected_run.get("effective_kraken_execution_mode") or "N/A",
                         "live_readiness_status": selected_run.get("live_readiness_status"),
+                        "auth_test_status": selected_run.get("auth_test_status") or "N/A",
+                        "validate_preflight_status": selected_run.get("validate_preflight_status") or "N/A",
+                        "final_live_preflight_status": selected_run.get("final_live_preflight_status") or "N/A",
+                        "latest_live_preflight": selected_run.get("latest_live_preflight"),
                         "kraken_cli_status": CLI_STATUS_LABELS.get(
                             selected_run.get("kraken_cli_status"),
                             selected_run.get("kraken_cli_status"),
@@ -690,6 +771,10 @@ def main() -> None:
                     "requested_kraken_execution_mode": proof_summary.get("requested_kraken_execution_mode") or "N/A",
                     "effective_kraken_execution_mode": proof_summary.get("effective_kraken_execution_mode") or "N/A",
                     "live_readiness_status": proof_summary.get("live_readiness_status"),
+                    "auth_test_status": proof_summary.get("auth_test_status") or "N/A",
+                    "validate_preflight_status": proof_summary.get("validate_preflight_status") or "N/A",
+                    "final_live_preflight_status": proof_summary.get("final_live_preflight_status") or "N/A",
+                    "latest_live_preflight": proof_summary.get("latest_live_preflight"),
                     "modes": proof_summary["modes"],
                     "agent": agent_identity_summary,
                 }
@@ -743,12 +828,18 @@ def main() -> None:
             st.write(f"Order provider: `{latest_summary['order_provider'] or 'N/A'}`")
             st.write(f"Receipt id: `{latest_summary['receipt_id'] or 'N/A'}`")
             st.write(f"Receipt status: `{latest_summary['receipt_status'] or 'N/A'}`")
+            st.write(f"Auth test: `{latest_summary['auth_test_status'] or 'N/A'}`")
+            st.write(f"Validate: `{latest_summary['validate_preflight_status'] or 'N/A'}`")
         with execution_col:
             st.subheader("Trade Outcome")
             st.write(f"Status: `{latest_summary['trade_status']}`")
             st.write(f"Quantity: `{latest_summary['quantity']}`")
             st.write(f"Price: `{latest_summary['price_executed']}`")
             st.write(f"PnL: `{latest_summary['pnl']}`")
+            st.write(f"Live preflight: `{latest_summary['live_preflight_status'] or 'N/A'}`")
+            st.write(
+                f"No live submit performed: `{latest_summary['no_live_submit_performed']}`"
+            )
 
         with st.expander("Latest Decision Chain Details", expanded=False):
             st.json(latest_chain)

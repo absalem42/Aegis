@@ -63,7 +63,8 @@ In practice:
   - Kraken CLI paper execution
 - Execution logic should be isolated from Streamlit UI code.
 - Kraken-specific behavior belongs in an adapter, not in the core engine.
-- Kraken live execution remains a guarded readiness path and is blocked in this milestone.
+- Kraken live execution remains a guarded readiness path in this milestone.
+- The only live-facing behavior currently allowed is Kraken CLI auth plus `order ... --validate` preflight. No live submit occurs.
 - A minimal local order lifecycle may be stored separately from fills so audit views can distinguish intents, orders, receipts, and trades.
 
 ## Trust Artifact Interface Boundary

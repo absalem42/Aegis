@@ -40,6 +40,9 @@ def build_execution_receipt(
             "requested_kraken_execution_mode": outcome.requested_kraken_execution_mode,
             "effective_kraken_execution_mode": outcome.effective_kraken_execution_mode,
             "status": persisted.get("status", outcome.status),
+            "auth_test_status": outcome.auth_test_status,
+            "validate_preflight_status": outcome.validate_preflight_status,
+            "live_preflight_status": outcome.live_preflight_status,
             "filled_quantity": persisted.get("filled_quantity", outcome.filled_quantity),
             "fill_price": persisted.get("fill_price", outcome.fill_price),
             "pnl": persisted.get("pnl"),
@@ -47,7 +50,11 @@ def build_execution_receipt(
         },
         "safety_snapshot": safety_snapshot,
         "modes": mode_summary,
-        "notes": "Post-execution receipt linking the trade intent to the local order lifecycle.",
+        "notes": (
+            "Execution receipt linking the trade intent to the local order lifecycle. "
+            "For Kraken live readiness, this artifact records auth and validate preflight only; no live submit was performed."
+        ),
+        "no_live_submit_performed": True,
     }
     payload["validation_readiness"] = build_validation_readiness(
         payload,

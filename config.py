@@ -117,6 +117,8 @@ class Settings:
         "AEGIS_KRAKEN_LIVE_CONFIRMATION_TEXT",
         "ENABLE_LIVE_ORDERS",
     )
+    session_live_opt_in: bool = False
+    session_live_confirmation_input: str = ""
     agent_id: str = os.getenv("AEGIS_AGENT_ID", "aegis-local-agent")
     agent_name: str = os.getenv("AEGIS_AGENT_NAME", "Aegis")
     agent_version: str = os.getenv("AEGIS_AGENT_VERSION", "0.1.0")

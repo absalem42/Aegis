@@ -164,6 +164,9 @@ def format_artifact_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "execution_provider": execution.get("execution_provider"),
                 "execution_mode": execution.get("effective_execution_mode"),
                 "execution_status": execution.get("status"),
+                "auth_test_status": execution.get("auth_test_status"),
+                "validate_preflight_status": execution.get("validate_preflight_status"),
+                "live_preflight_status": execution.get("live_preflight_status"),
                 "local_order_id": execution.get("local_order_id"),
                 "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
                 "readiness": _readiness_badge(readiness),
@@ -210,6 +213,7 @@ def format_latest_artifact_summary(row: dict[str, Any] | None) -> dict[str, Any]
         "validation_readiness": readiness,
         "execution": execution,
         "trade_intent_artifact_id": payload.get("trade_intent_artifact_id"),
+        "no_live_submit_performed": payload.get("no_live_submit_performed"),
         "summary": summary,
     }
 
@@ -245,6 +249,10 @@ def format_run_history_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "effective_kraken_execution_mode": modes.get("effective_kraken_execution_mode"),
                 "execution_source_type": modes.get("execution_source_type"),
                 "live_readiness_status": modes.get("live_readiness_status"),
+                "auth_test_status": modes.get("auth_test_status"),
+                "validate_preflight_status": modes.get("validate_preflight_status"),
+                "final_live_preflight_status": modes.get("final_live_preflight_status"),
+                "latest_live_preflight": summary.get("latest_live_preflight"),
             }
         )
     return formatted
@@ -301,6 +309,10 @@ def build_proof_summary(selected_run: dict[str, Any] | None) -> dict[str, Any] |
         "requested_kraken_execution_mode": selected_run.get("requested_kraken_execution_mode"),
         "effective_kraken_execution_mode": selected_run.get("effective_kraken_execution_mode"),
         "live_readiness_status": selected_run.get("live_readiness_status"),
+        "auth_test_status": selected_run.get("auth_test_status"),
+        "validate_preflight_status": selected_run.get("validate_preflight_status"),
+        "final_live_preflight_status": selected_run.get("final_live_preflight_status"),
+        "latest_live_preflight": selected_run.get("latest_live_preflight"),
         "why_it_matters": "This run preserves a local trail from signal to risk decision to trade intent, order lifecycle, receipt artifact, and final outcome for easier audit and judging.",
     }
 
@@ -323,6 +335,9 @@ def build_agent_identity_summary(settings: Any, mode_summary: dict[str, Any]) ->
         "requested_kraken_execution_mode": mode_summary.get("requested_kraken_execution_mode"),
         "effective_kraken_execution_mode": mode_summary.get("effective_kraken_execution_mode"),
         "live_readiness_status": mode_summary.get("live_readiness_status"),
+        "auth_test_status": mode_summary.get("auth_test_status"),
+        "validate_preflight_status": mode_summary.get("validate_preflight_status"),
+        "final_live_preflight_status": mode_summary.get("final_live_preflight_status"),
         "scope": "local-only",
     }
 
@@ -427,6 +442,58 @@ def build_decision_chains(
             }
         )
 
+    traded_order_ids = {row.get("order_id") for row in trade_rows if row.get("order_id")}
+    for row in order_rows or []:
+        if row.get("id") in traded_order_ids:
+            continue
+        artifact = trade_intents.get(row.get("artifact_id"))
+        artifact_payload = _loads_json(artifact.get("payload_json")) if artifact else {}
+        receipt = receipts_by_trade_intent.get(row.get("artifact_id"))
+        receipt_payload = _loads_json(receipt.get("payload_json")) if receipt else {}
+        matched_signal = _match_signal(
+            signals=signals,
+            symbol=row.get("symbol"),
+            reason=artifact_payload.get("reason"),
+            ts=row.get("ts"),
+        )
+        chains.append(
+            {
+                "ts": row.get("ts"),
+                "symbol": row.get("symbol"),
+                "action": row.get("side"),
+                "outcome": "PREFLIGHT",
+                "signal_reason": artifact_payload.get("reason") or row.get("notes"),
+                "signal": _signal_summary(matched_signal),
+                "risk": {
+                    "allowed": artifact_payload.get("risk", {}).get("allowed"),
+                    "summary": artifact_payload.get("risk", {}).get("summary"),
+                    "reason_codes": artifact_payload.get("risk", {}).get("reason_codes", []),
+                },
+                "trade_intent": _artifact_summary(artifact),
+                "artifact": _artifact_summary(artifact),
+                "order": _order_summary(row),
+                "receipt": _receipt_summary(receipt),
+                "execution": {
+                    "status": row.get("status"),
+                    "quantity": row.get("quantity"),
+                    "price": artifact_payload.get("price"),
+                    "notional": _safe_notional(row.get("quantity"), artifact_payload.get("price")),
+                    "pnl": None,
+                    "artifact_id": row.get("artifact_id"),
+                    "order_id": row.get("id"),
+                    "execution_provider": row.get("execution_provider"),
+                    "receipt_id": receipt.get("id") if receipt else None,
+                    "execution_mode": receipt_payload.get("execution", {}).get("effective_execution_mode"),
+                    "requested_kraken_execution_mode": receipt_payload.get("execution", {}).get("requested_kraken_execution_mode"),
+                    "effective_kraken_execution_mode": receipt_payload.get("execution", {}).get("effective_kraken_execution_mode"),
+                    "auth_test_status": receipt_payload.get("execution", {}).get("auth_test_status"),
+                    "validate_preflight_status": receipt_payload.get("execution", {}).get("validate_preflight_status"),
+                    "live_preflight_status": receipt_payload.get("execution", {}).get("live_preflight_status"),
+                    "no_live_submit_performed": receipt_payload.get("no_live_submit_performed", True),
+                },
+            }
+        )
+
     for row in blocked_trade_rows:
         context = _loads_json(row.get("context_json"))
         matched_signal = _match_signal(
@@ -526,6 +593,10 @@ def format_decision_chain_summary(chain: dict[str, Any]) -> dict[str, Any]:
         "order_provider": order.get("execution_provider"),
         "receipt_id": receipt.get("artifact_id"),
         "receipt_status": receipt.get("status"),
+        "auth_test_status": execution.get("auth_test_status"),
+        "validate_preflight_status": execution.get("validate_preflight_status"),
+        "live_preflight_status": execution.get("live_preflight_status"),
+        "no_live_submit_performed": execution.get("no_live_submit_performed"),
         "trade_status": execution.get("status"),
         "quantity": execution.get("quantity"),
         "price_executed": execution.get("price"),
@@ -547,6 +618,8 @@ def format_decision_chain_rows(chains: list[dict[str, Any]]) -> list[dict[str, A
             "order_id": chain.get("order", {}).get("order_id"),
             "receipt_id": chain.get("receipt", {}).get("artifact_id"),
             "trade_status": chain.get("execution", {}).get("status"),
+            "auth_test_status": chain.get("execution", {}).get("auth_test_status"),
+            "validate_preflight_status": chain.get("execution", {}).get("validate_preflight_status"),
         }
         for chain in chains
     ]
@@ -777,4 +850,8 @@ def _receipt_summary(row: dict[str, Any] | None) -> dict[str, Any]:
         "execution_provider": execution.get("execution_provider"),
         "execution_mode": execution.get("effective_execution_mode"),
         "summary": "Execution receipt artifact saved after order persistence.",
+        "auth_test_status": execution.get("auth_test_status"),
+        "validate_preflight_status": execution.get("validate_preflight_status"),
+        "live_preflight_status": execution.get("live_preflight_status"),
+        "no_live_submit_performed": payload.get("no_live_submit_performed", True),
     }

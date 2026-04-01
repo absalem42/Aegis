@@ -22,6 +22,7 @@ from db import (
     count_open_positions,
     get_cash_balance,
     get_connection,
+    get_daily_live_preflight_notional,
     get_position,
     get_recent_trade_pnls,
     get_total_market_value,
@@ -36,6 +37,7 @@ from db import (
 from execution import (
     ExecutionProvider,
     KrakenCliExecutionError,
+    KrakenCliLivePreflightExecutor,
     KrakenCliPaperExecutor,
 )
 from execution.kraken_executor import KrakenExecutorStub
@@ -43,12 +45,15 @@ from execution.paper_executor import PaperExecutor
 from execution.safety import (
     build_live_readiness_snapshot,
     live_execution_is_blocked,
+    live_preflight_can_run,
+    LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
+    LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
 )
 from market import MarketDataProvider
 from market.kraken_cli import KrakenCliError, KrakenCliMarketDataProvider
 from market.kraken_client import KrakenMarketDataError, KrakenPublicMarketDataProvider
 from market.mock_data import MockMarketDataProvider
-from models import EngineCycleResult, ExecutionRequest, Signal
+from models import EngineCycleResult, ExecutionOutcome, ExecutionRequest, Signal
 from proof.agent_identity import build_agent_identity
 from proof.artifact_store import save_artifact, save_trade_artifact
 from proof.execution_receipt import build_execution_receipt
@@ -70,6 +75,9 @@ KRAKEN_CLI_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
 EXECUTION_STATUS_ACTIVE = "ACTIVE"
 EXECUTION_STATUS_FALLBACK_TO_INTERNAL_PAPER = "FALLBACK_TO_INTERNAL_PAPER"
 EXECUTION_STATUS_BLOCKED = "BLOCKED"
+EXECUTION_STATUS_PREFLIGHT_ONLY = "PREFLIGHT_ONLY"
+EXECUTION_STATUS_PREFLIGHT_PASSED = "PREFLIGHT_PASSED"
+EXECUTION_STATUS_PREFLIGHT_FAILED = "PREFLIGHT_FAILED"
 EXECUTION_STATUS_NOT_REQUESTED = "NOT_REQUESTED"
 EXECUTION_MODE_BLOCKED = "blocked"
 
@@ -93,6 +101,9 @@ class RuntimeModeState:
     execution_source_type: str
     live_readiness_status: str
     live_readiness: dict[str, Any]
+    auth_test_status: str | None
+    validate_preflight_status: str | None
+    final_live_preflight_status: str | None
     kraken_ohlc_interval_minutes: int
     kraken_history_length: int
     warnings: list[str]
@@ -116,6 +127,9 @@ class RuntimeModeState:
             "execution_source_type": self.execution_source_type,
             "live_readiness_status": self.live_readiness_status,
             "live_readiness": self.live_readiness,
+            "auth_test_status": self.auth_test_status,
+            "validate_preflight_status": self.validate_preflight_status,
+            "final_live_preflight_status": self.final_live_preflight_status,
             "kraken_ohlc_interval_minutes": self.kraken_ohlc_interval_minutes,
             "kraken_history_length": self.kraken_history_length,
             "warnings": self.warnings,
@@ -141,6 +155,9 @@ def resolve_runtime_components(
     execution_provider_name = execution_provider.provider_name
     execution_status = EXECUTION_STATUS_ACTIVE
     execution_source_type = execution_provider.source_type
+    auth_test_status: str | None = None
+    validate_preflight_status: str | None = None
+    final_live_preflight_status: str | None = None
 
     if settings.market_data_mode == MARKET_DATA_MODE_KRAKEN:
         requested_kraken_backend = settings.kraken_backend
@@ -247,15 +264,25 @@ def resolve_runtime_components(
                 execution_status = EXECUTION_STATUS_ACTIVE
                 execution_source_type = kraken_execution.source_type
         else:
-            warnings.append(
-                "Kraken live execution is planned and guarded, but not enabled in this milestone."
-            )
-            execution_provider = KrakenExecutorStub()
-            effective_execution_mode = EXECUTION_MODE_BLOCKED
-            effective_kraken_execution_mode = KRAKEN_EXECUTION_MODE_LIVE
-            execution_provider_name = execution_provider.provider_name
-            execution_status = EXECUTION_STATUS_BLOCKED
-            execution_source_type = execution_provider.source_type
+            try:
+                execution_provider = _build_kraken_cli_live_preflight_executor(settings)
+            except KrakenCliExecutionError as exc:
+                warnings.append(
+                    "Kraken live preflight is not runnable "
+                    f"({exc}). Live readiness remains blocked in this milestone."
+                )
+                execution_provider = KrakenExecutorStub()
+                effective_execution_mode = "kraken_live_preflight"
+                effective_kraken_execution_mode = KRAKEN_EXECUTION_MODE_LIVE
+                execution_provider_name = execution_provider.provider_name
+                execution_status = EXECUTION_STATUS_BLOCKED
+                execution_source_type = execution_provider.source_type
+            else:
+                effective_execution_mode = "kraken_live_preflight"
+                effective_kraken_execution_mode = KRAKEN_EXECUTION_MODE_LIVE
+                execution_provider_name = execution_provider.provider_name
+                execution_status = EXECUTION_STATUS_PREFLIGHT_ONLY
+                execution_source_type = execution_provider.source_type
 
     live_readiness = build_live_readiness_snapshot(
         settings,
@@ -280,6 +307,9 @@ def resolve_runtime_components(
         execution_source_type=execution_source_type,
         live_readiness_status=str(live_readiness.get("status", "UNKNOWN")),
         live_readiness=live_readiness,
+        auth_test_status=auth_test_status,
+        validate_preflight_status=validate_preflight_status,
+        final_live_preflight_status=final_live_preflight_status,
         kraken_ohlc_interval_minutes=settings.kraken_ohlc_interval_minutes,
         kraken_history_length=settings.kraken_history_length,
         warnings=warnings,
@@ -310,6 +340,13 @@ def _build_kraken_cli_provider(settings: Settings) -> KrakenCliMarketDataProvide
 
 def _build_kraken_cli_paper_executor(settings: Settings) -> KrakenCliPaperExecutor:
     return KrakenCliPaperExecutor(
+        command_prefix=settings.kraken_cli_command,
+        timeout_seconds=settings.kraken_cli_timeout_seconds,
+    )
+
+
+def _build_kraken_cli_live_preflight_executor(settings: Settings) -> KrakenCliLivePreflightExecutor:
+    return KrakenCliLivePreflightExecutor(
         command_prefix=settings.kraken_cli_command,
         timeout_seconds=settings.kraken_cli_timeout_seconds,
     )
@@ -384,6 +421,8 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
         artifact_count = 0
         order_count = 0
         receipt_count = 0
+        executable_decisions: list[dict[str, Any]] = []
+        live_preflight_summary: dict[str, Any] | None = None
 
         for signal in signals:
             insert_signal(connection, signal)
@@ -429,18 +468,222 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 logger.info("Blocked %s %s: %s", signal.action, signal.symbol, risk_decision.summary())
                 continue
 
+            executable_decisions.append(
+                {
+                    "signal": signal,
+                    "risk_decision": risk_decision,
+                    "quantity": quantity,
+                    "price": latest_prices[signal.symbol],
+                }
+            )
+
+        live_candidate_count = (
+            len(executable_decisions)
+            if mode_state.requested_execution_mode == EXECUTION_MODE_KRAKEN
+            and mode_state.requested_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
+            else None
+        )
+
+        for decision in executable_decisions:
+            signal = decision["signal"]
+            risk_decision = decision["risk_decision"]
+            quantity = float(decision["quantity"])
+            signal_price = float(decision["price"])
             artifact_payload = build_trade_intent(
                 run_id=run_id,
                 signal=signal,
                 risk_decision=risk_decision,
                 quantity=quantity,
-                price=latest_prices[signal.symbol],
-                latest_price=latest_prices[signal.symbol],
+                price=signal_price,
+                latest_price=signal_price,
                 mode_summary=mode_state.to_dict(),
                 agent_identity=agent_identity,
             )
             artifact_meta = save_trade_artifact(connection, settings, artifact_payload)
             artifact_count += 1
+
+            request = ExecutionRequest(
+                run_id=run_id,
+                symbol=signal.symbol,
+                side=signal.action,
+                quantity=quantity,
+                price=signal_price,
+                order_type="market",
+                artifact_id=artifact_meta["artifact_id"],
+                requested_execution_mode=mode_state.requested_execution_mode,
+                requested_kraken_execution_mode=mode_state.requested_kraken_execution_mode,
+                requested_execution_provider=mode_state.execution_provider,
+                mode_summary=mode_state.to_dict(),
+                signal_reason=signal.reason,
+            )
+
+            if mode_state.requested_execution_mode == EXECUTION_MODE_KRAKEN and (
+                mode_state.requested_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
+            ):
+                daily_live_notional = get_daily_live_preflight_notional(connection)
+                live_readiness = build_live_readiness_snapshot(
+                    settings,
+                    requested_execution_mode=mode_state.requested_execution_mode,
+                    requested_kraken_execution_mode=mode_state.requested_kraken_execution_mode,
+                    candidate_symbol=signal.symbol,
+                    candidate_notional=round(quantity * signal_price, 6),
+                    live_candidate_count=live_candidate_count,
+                    daily_live_notional=daily_live_notional,
+                )
+                mode_state.live_readiness = live_readiness
+                mode_state.live_readiness_status = str(live_readiness.get("status", "UNKNOWN"))
+                request.mode_summary = mode_state.to_dict()
+
+                if mode_state.execution_status == EXECUTION_STATUS_BLOCKED or not live_preflight_can_run(live_readiness):
+                    mode_state.execution_status = EXECUTION_STATUS_BLOCKED
+                    mode_state.auth_test_status = "NOT_RUN"
+                    mode_state.validate_preflight_status = "NOT_RUN"
+                    mode_state.final_live_preflight_status = "BLOCKED"
+                    blocked_count += 1
+                    outcome = _build_live_preflight_outcome(
+                        request=request,
+                        execution_provider=mode_state.execution_provider,
+                        execution_source_type=mode_state.execution_source_type,
+                        status="BLOCKED",
+                        auth_test_status="NOT_RUN",
+                        validate_preflight_status="NOT_RUN",
+                        live_preflight_status="BLOCKED",
+                        external_status="blocked",
+                        provider_metadata={
+                            "readiness": live_readiness,
+                            "requested_notional": round(quantity * signal_price, 6),
+                            "no_live_submit_performed": True,
+                        },
+                        notes="Kraken live preflight was blocked before auth and validate checks.",
+                    )
+                else:
+                    preflight_executor = _build_kraken_cli_live_preflight_executor(settings)
+                    try:
+                        auth_payload = preflight_executor.auth_test()
+                    except KrakenCliExecutionError as exc:
+                        mode_state.execution_status = EXECUTION_STATUS_PREFLIGHT_FAILED
+                        mode_state.auth_test_status = "FAILED"
+                        mode_state.validate_preflight_status = "NOT_RUN"
+                        mode_state.final_live_preflight_status = "PREFLIGHT_FAILED"
+                        live_readiness = {
+                            **live_readiness,
+                            "status": LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
+                            "summary": "Kraken auth test failed before validate preflight.",
+                            "auth_test_status": "FAILED",
+                            "validate_preflight_status": "NOT_RUN",
+                            "preflight_ran": True,
+                        }
+                        blocked_count += 1
+                        outcome = _build_live_preflight_outcome(
+                            request=request,
+                            execution_provider=preflight_executor.provider_name,
+                            execution_source_type=preflight_executor.source_type,
+                            status="PREFLIGHT_FAILED",
+                            auth_test_status="FAILED",
+                            validate_preflight_status="NOT_RUN",
+                            live_preflight_status="PREFLIGHT_FAILED",
+                            external_status="auth_failed",
+                            provider_metadata={
+                                "auth_test_error": str(exc),
+                                "requested_notional": round(quantity * signal_price, 6),
+                                "no_live_submit_performed": True,
+                            },
+                            notes="Kraken auth test failed. No live submit was performed.",
+                        )
+                    else:
+                        try:
+                            validate_payload = preflight_executor.validate_market_order(request)
+                        except KrakenCliExecutionError as exc:
+                            mode_state.execution_status = EXECUTION_STATUS_PREFLIGHT_FAILED
+                            mode_state.auth_test_status = "PASSED"
+                            mode_state.validate_preflight_status = "FAILED"
+                            mode_state.final_live_preflight_status = "PREFLIGHT_FAILED"
+                            live_readiness = {
+                                **live_readiness,
+                                "status": LIVE_READINESS_STATUS_PREFLIGHT_FAILED,
+                                "summary": "Kraken auth test passed, but validate preflight failed.",
+                                "auth_test_status": "PASSED",
+                                "validate_preflight_status": "FAILED",
+                                "preflight_ran": True,
+                            }
+                            blocked_count += 1
+                            outcome = _build_live_preflight_outcome(
+                                request=request,
+                                execution_provider=preflight_executor.provider_name,
+                                execution_source_type=preflight_executor.source_type,
+                                status="PREFLIGHT_FAILED",
+                                auth_test_status="PASSED",
+                                validate_preflight_status="FAILED",
+                                live_preflight_status="PREFLIGHT_FAILED",
+                                external_status="validate_failed",
+                                provider_metadata={
+                                    "auth_test": auth_payload,
+                                    "validate_preflight_error": str(exc),
+                                    "requested_notional": round(quantity * signal_price, 6),
+                                    "no_live_submit_performed": True,
+                                },
+                                notes="Kraken validate preflight failed. No live submit was performed.",
+                            )
+                        else:
+                            mode_state.execution_status = EXECUTION_STATUS_PREFLIGHT_PASSED
+                            mode_state.auth_test_status = "PASSED"
+                            mode_state.validate_preflight_status = "PASSED"
+                            mode_state.final_live_preflight_status = "PREFLIGHT_PASSED"
+                            live_readiness = {
+                                **live_readiness,
+                                "status": LIVE_READINESS_STATUS_PREFLIGHT_PASSED,
+                                "summary": "Kraken auth test and validate preflight both passed. No live submit was performed.",
+                                "auth_test_status": "PASSED",
+                                "validate_preflight_status": "PASSED",
+                                "preflight_ran": True,
+                            }
+                            outcome = _build_live_preflight_outcome(
+                                request=request,
+                                execution_provider=preflight_executor.provider_name,
+                                execution_source_type=preflight_executor.source_type,
+                                status="PREFLIGHT_PASSED",
+                                auth_test_status="PASSED",
+                                validate_preflight_status="PASSED",
+                                live_preflight_status="PREFLIGHT_PASSED",
+                                external_status="validated",
+                                provider_metadata={
+                                    "auth_test": auth_payload,
+                                    "validate_preflight": validate_payload,
+                                    "requested_notional": round(quantity * signal_price, 6),
+                                    "no_live_submit_performed": True,
+                                },
+                                notes="Kraken live preflight passed auth and validate checks. No live submit was performed.",
+                            )
+                    mode_state.live_readiness = live_readiness
+                    mode_state.live_readiness_status = str(live_readiness.get("status", "UNKNOWN"))
+
+                request.mode_summary = mode_state.to_dict()
+                persisted = apply_execution_outcome(connection, outcome, reason=signal.reason)
+                order_count += 1
+                receipt_payload = build_execution_receipt(
+                    run_id=run_id,
+                    symbol=signal.symbol,
+                    trade_intent_artifact_id=artifact_meta["artifact_id"],
+                    outcome=outcome,
+                    persisted=persisted,
+                    mode_summary=mode_state.to_dict(),
+                    agent_identity=agent_identity,
+                    safety_snapshot=mode_state.live_readiness,
+                )
+                save_artifact(connection, settings, receipt_payload, notes="Live preflight execution receipt.")
+                artifact_count += 1
+                receipt_count += 1
+                live_preflight_summary = {
+                    "symbol": signal.symbol,
+                    "status": outcome.status,
+                    "auth_test_status": outcome.auth_test_status,
+                    "validate_preflight_status": outcome.validate_preflight_status,
+                    "order_id": outcome.local_order_id,
+                    "artifact_id": artifact_meta["artifact_id"],
+                    "receipt_live_preflight_status": outcome.live_preflight_status,
+                }
+                logger.info("Recorded live preflight for %s %s with status %s", signal.action, signal.symbol, outcome.status)
+                continue
 
             if mode_state.execution_status == EXECUTION_STATUS_BLOCKED or live_execution_is_blocked(
                 mode_state.live_readiness
@@ -465,21 +708,6 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
                 )
                 logger.info("Execution blocked for %s %s", signal.action, signal.symbol)
                 continue
-
-            request = ExecutionRequest(
-                run_id=run_id,
-                symbol=signal.symbol,
-                side=signal.action,
-                quantity=quantity,
-                price=latest_prices[signal.symbol],
-                order_type="market",
-                artifact_id=artifact_meta["artifact_id"],
-                requested_execution_mode=mode_state.requested_execution_mode,
-                requested_kraken_execution_mode=mode_state.requested_kraken_execution_mode,
-                requested_execution_provider=mode_state.execution_provider,
-                mode_summary=mode_state.to_dict(),
-                signal_reason=signal.reason,
-            )
 
             try:
                 outcome = executor.execute(connection=connection, request=request)
@@ -531,6 +759,7 @@ def run_engine_cycle(settings: Settings | None = None) -> EngineCycleResult:
             "latest_prices": latest_prices,
             "metrics": metrics,
             "modes": mode_state.to_dict(),
+            "latest_live_preflight": live_preflight_summary,
         }
         record_agent_run(connection, run_id=run_id, status="COMPLETED", summary=summary)
 
@@ -574,6 +803,13 @@ def reset_demo_state(settings: Settings | None = None) -> dict[str, object]:
 def reseed_demo_state(settings: Settings | None = None, cycles: int = 2) -> dict[str, object]:
     settings = settings or load_settings()
     cycles = max(1, cycles)
+    if (
+        settings.execution_mode == EXECUTION_MODE_KRAKEN
+        and settings.kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE
+    ):
+        raise KrakenCliExecutionError(
+            "Kraken live preflight is single-cycle only in this milestone. Reseed remains disabled for live readiness mode."
+        )
 
     reset_summary = reset_demo_state(settings)
     cycle_results: list[dict[str, object]] = []
@@ -638,3 +874,71 @@ def _execution_block_message(mode_state: RuntimeModeState) -> str:
     if mode_state.requested_kraken_execution_mode == KRAKEN_EXECUTION_MODE_LIVE:
         return "KRAKEN_LIVE_DISABLED"
     return "EXECUTION_BLOCKED"
+
+
+def _build_live_preflight_outcome(
+    request: ExecutionRequest,
+    execution_provider: str,
+    execution_source_type: str,
+    *,
+    status: str,
+    auth_test_status: str,
+    validate_preflight_status: str,
+    live_preflight_status: str,
+    external_status: str,
+    provider_metadata: dict[str, Any],
+    notes: str,
+) -> ExecutionOutcome:
+    return executor_outcome_factory(
+        request=request,
+        execution_provider=execution_provider,
+        execution_source_type=execution_source_type,
+        status=status,
+        auth_test_status=auth_test_status,
+        validate_preflight_status=validate_preflight_status,
+        live_preflight_status=live_preflight_status,
+        external_status=external_status,
+        provider_metadata=provider_metadata,
+        notes=notes,
+    )
+
+
+def executor_outcome_factory(
+    request: ExecutionRequest,
+    execution_provider: str,
+    execution_source_type: str,
+    *,
+    status: str,
+    auth_test_status: str,
+    validate_preflight_status: str,
+    live_preflight_status: str,
+    external_status: str,
+    provider_metadata: dict[str, Any],
+    notes: str,
+) -> ExecutionOutcome:
+    return ExecutionOutcome(
+        run_id=request.run_id,
+        local_order_id=str(uuid4()),
+        symbol=request.symbol,
+        side=request.side.upper(),
+        quantity=round(request.quantity, 6),
+        filled_quantity=0.0,
+        price=round(request.price, 6),
+        fill_price=0.0,
+        notional=round(request.quantity * request.price, 6),
+        artifact_id=request.artifact_id,
+        order_type=request.order_type,
+        status=status,
+        execution_provider=execution_provider,
+        execution_source_type=execution_source_type,
+        requested_execution_mode=request.requested_execution_mode,
+        effective_execution_mode="kraken_live_preflight",
+        requested_kraken_execution_mode=request.requested_kraken_execution_mode,
+        effective_kraken_execution_mode=KRAKEN_EXECUTION_MODE_LIVE,
+        provider_metadata=provider_metadata,
+        external_status=external_status,
+        auth_test_status=auth_test_status,
+        validate_preflight_status=validate_preflight_status,
+        live_preflight_status=live_preflight_status,
+        notes=notes,
+    )

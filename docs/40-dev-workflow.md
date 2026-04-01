@@ -75,6 +75,7 @@ During implementation:
 - Do not add schedulers or worker systems.
 - Do not add live trading support in v0.
 - Do not enable Kraken live order submit in the current milestone.
+- Kraken live work is limited to readiness and preflight checks such as auth and validate-only CLI calls.
 - Do not introduce speculative abstractions beyond the documented future boundaries.
 
 ## Definition of Done

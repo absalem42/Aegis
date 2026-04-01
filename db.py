@@ -438,6 +438,26 @@ def list_recent_orders(connection: sqlite3.Connection, limit: int = 10) -> list[
     return list_recent(connection, "orders", limit=limit)
 
 
+def get_daily_live_preflight_notional(connection: sqlite3.Connection, trading_day: str | None = None) -> float:
+    day_prefix = trading_day or utc_now_iso()[:10]
+    rows = connection.execute(
+        """
+        SELECT response_json FROM orders
+        WHERE execution_mode = 'kraken_live_preflight'
+          AND ts LIKE ?
+        """,
+        (f"{day_prefix}%",),
+    ).fetchall()
+    total = 0.0
+    for row in rows:
+        payload = _loads_json(row["response_json"])
+        try:
+            total += float(payload.get("requested_notional", 0.0))
+        except (TypeError, ValueError):
+            continue
+    return round(total, 6)
+
+
 def get_recent_trade_pnls(connection: sqlite3.Connection, limit: int = 5) -> list[float]:
     rows = connection.execute(
         """
@@ -614,6 +634,8 @@ def reset_runtime_state(settings: Settings) -> dict[str, Any]:
 
 
 def _execution_mode_label(outcome: ExecutionOutcome) -> str:
+    if outcome.effective_execution_mode == "kraken_live_preflight":
+        return "kraken_live_preflight"
     if outcome.effective_kraken_execution_mode:
         return outcome.effective_kraken_execution_mode
     return outcome.effective_execution_mode
@@ -629,3 +651,13 @@ def _ensure_column(connection: sqlite3.Connection, table: str, column: str, ddl:
 def _count_table(connection: sqlite3.Connection, table: str) -> int:
     row = connection.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
     return int(row["count"]) if row else 0
+
+
+def _loads_json(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}

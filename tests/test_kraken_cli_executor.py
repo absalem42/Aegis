@@ -4,6 +4,7 @@ import pytest
 
 from execution.kraken_cli_executor import (
     KrakenCliExecutionError,
+    KrakenCliLivePreflightExecutor,
     KrakenCliPaperExecutor,
     KrakenCliPaperRunner,
 )
@@ -134,3 +135,86 @@ def test_cli_paper_executor_raises_when_order_payload_is_missing_fields(monkeypa
 
     with pytest.raises(KrakenCliExecutionError, match="filled quantity"):
         executor.execute(connection=None, request=request)
+
+
+def test_cli_live_preflight_auth_test_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        "execution.kraken_cli_executor.subprocess.run",
+        lambda *_args, **_kwargs: _completed('{"authenticated": true, "status": "ok"}'),
+    )
+    executor = KrakenCliLivePreflightExecutor(command_prefix="kraken", timeout_seconds=5)
+
+    payload = executor.auth_test()
+
+    assert payload["authenticated"] is True
+
+
+def test_cli_live_preflight_auth_test_fails(monkeypatch):
+    monkeypatch.setattr(
+        "execution.kraken_cli_executor.subprocess.run",
+        lambda *_args, **_kwargs: _completed('{"authenticated": false, "status": "failed"}'),
+    )
+    executor = KrakenCliLivePreflightExecutor(command_prefix="kraken", timeout_seconds=5)
+
+    with pytest.raises(KrakenCliExecutionError, match="auth test failed"):
+        executor.auth_test()
+
+
+def test_cli_live_preflight_validate_succeeds(monkeypatch):
+    monkeypatch.setattr(
+        "execution.kraken_cli_executor.subprocess.run",
+        lambda *_args, **_kwargs: _completed('{"status":"validated","validated":true}'),
+    )
+    executor = KrakenCliLivePreflightExecutor(command_prefix="kraken", timeout_seconds=5)
+    request = ExecutionRequest(
+        run_id="run-1",
+        symbol="BTC/USD",
+        side="BUY",
+        quantity=0.1,
+        price=69420.0,
+        order_type="market",
+        artifact_id="artifact-1",
+        requested_execution_mode="kraken",
+        requested_kraken_execution_mode="live",
+        requested_execution_provider="Kraken CLI Live Preflight",
+        mode_summary={
+            "effective_execution_mode": "kraken_live_preflight",
+            "effective_kraken_execution_mode": "live",
+        },
+        signal_reason="EMA_BULLISH_BREAKOUT",
+    )
+
+    payload = executor.validate_market_order(request)
+
+    assert payload["status"] == "validated"
+
+
+def test_cli_live_preflight_validate_fails_on_non_zero_exit(monkeypatch):
+    monkeypatch.setattr(
+        "execution.kraken_cli_executor.subprocess.run",
+        lambda *_args, **_kwargs: _completed(
+            '{"error":"validation","message":"order rejected"}',
+            returncode=2,
+        ),
+    )
+    executor = KrakenCliLivePreflightExecutor(command_prefix="kraken", timeout_seconds=5)
+    request = ExecutionRequest(
+        run_id="run-1",
+        symbol="BTC/USD",
+        side="BUY",
+        quantity=0.1,
+        price=69420.0,
+        order_type="market",
+        artifact_id="artifact-1",
+        requested_execution_mode="kraken",
+        requested_kraken_execution_mode="live",
+        requested_execution_provider="Kraken CLI Live Preflight",
+        mode_summary={
+            "effective_execution_mode": "kraken_live_preflight",
+            "effective_kraken_execution_mode": "live",
+        },
+        signal_reason="EMA_BULLISH_BREAKOUT",
+    )
+
+    with pytest.raises(KrakenCliExecutionError, match="order rejected"):
+        executor.validate_market_order(request)
